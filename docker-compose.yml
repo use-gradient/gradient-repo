@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gradient-db
+    environment:
+      POSTGRES_USER: gradient
+      POSTGRES_PASSWORD: gradient
+      POSTGRES_DB: gradient
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gradient"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: gradient-nats
+    entrypoint: ["nats-server", "-js", "-sd", "/data", "-m", "8222", "--server_name", "gradient-nats-local"]
+    ports:
+      - "4222:4222"   # Client connections
+      - "6222:6222"   # Cluster (intra-region HA)
+      - "7222:7222"   # Gateway (inter-region mesh)
+      - "8222:8222"   # Monitoring HTTP
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional: Vault for secrets backend (dev mode)
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: gradient-vault
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-token
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    profiles:
+      - secrets
+
+volumes:
+  pgdata:
+  natsdata:

@@ -1,0 +1,46 @@
+# Binaries
+bin/
+grad
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Environment
+.env
+.env.local
+
+# Go
+*.test
+*.out
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+
+# Node / Web
+node_modules/
+dist/
+web/node_modules/
+web/dist/
+
+# GCP credentials
+*-credentials.json
+gcp-key.json

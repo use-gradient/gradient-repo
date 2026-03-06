@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 14% 4%;
+    --foreground: 220 20% 76%;
+
+    --card: 220 10% 5%;
+    --card-foreground: 220 20% 76%;
+
+    --popover: 220 10% 7%;
+    --popover-foreground: 220 20% 76%;
+
+    --primary: 172 26% 48%;
+    --primary-foreground: 220 14% 4%;
+
+    --secondary: 220 10% 8%;
+    --secondary-foreground: 220 20% 76%;
+
+    --muted: 220 10% 10%;
+    --muted-foreground: 220 12% 38%;
+
+    --accent: 172 26% 48%;
+    --accent-foreground: 220 14% 4%;
+
+    --destructive: 12 54% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 172 26% 48%;
+    --warning: 48 96% 47%;
+    --info: 172 30% 55%;
+
+    --border: 220 10% 12%;
+    --input: 220 10% 12%;
+    --ring: 172 26% 48%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    min-height: 100vh;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* Skip link for a11y */
+.skip-link {
+  @apply absolute -top-full left-2 z-[9999] px-4 py-2 bg-primary text-primary-foreground rounded-md font-semibold text-sm no-underline;
+}
+.skip-link:focus {
+  @apply top-2;
+}
+
+/* Focus ring */
+:focus-visible {
+  @apply outline-2 outline-ring outline-offset-2;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { @apply bg-border rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-muted-foreground; }
+
+/* Clerk overrides */
+.cl-rootBox { width: 100%; }
+.cl-card {
+  background: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
+  box-shadow: none !important;
+}
