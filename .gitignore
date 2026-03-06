@@ -1,5 +1,6 @@
 # Binaries
 bin/
+api
 grad
 *.exe
 *.exe~
