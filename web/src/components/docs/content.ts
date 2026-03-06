@@ -77,37 +77,22 @@ Get a Gradient environment running in under 5 minutes.
 ## Prerequisites
 
 - macOS, Linux, or WSL
-- Docker (for local services)
-- A Hetzner API token (for cloud environments) or use \`make dev\` for local-only
+- A Gradient account — [sign up](https://gradient.dev)
 
 ## 1. Install the CLI
 
 \`\`\`bash
-# Build from source
-git clone https://github.com/gradient-platform/gradient
-cd gradient
-make build
-sudo cp bin/gc /usr/local/bin/gc
+curl -fsSL https://get.gradient.dev | sh
 \`\`\`
 
-## 2. Start local services
-
-\`\`\`bash
-make dev
-# Starts PostgreSQL, NATS, Vault
-# Builds binaries
-# Runs migrations
-# Starts API server on :6767
-\`\`\`
-
-## 3. Authenticate
+## 2. Authenticate
 
 \`\`\`bash
 gc auth login
-# Opens browser → sign in with Clerk → CLI authorized
+# Opens browser → sign in → CLI authorized
 \`\`\`
 
-## 4. Create your first context
+## 3. Create your first context
 
 \`\`\`bash
 # Save context for the main branch
@@ -117,13 +102,21 @@ gc context save --branch main --os ubuntu-24.04
 gc context save --branch main --packages python3=3.12,numpy=1.26.0
 \`\`\`
 
-## 5. Create an environment (requires Hetzner token)
+## 4. Create an environment
 
 \`\`\`bash
 gc env create --name my-env --size small --region nbg1
 # ✓ Environment created
 # ID: env-xxxxx
-# Status: creating (ready in ~90s)
+# Status: creating (ready in ~15s with warm pool)
+\`\`\`
+
+## 5. SSH in and start working
+
+\`\`\`bash
+gc env ssh <env-id>
+# You're now inside a cloud dev environment
+# Install anything — Gradient captures it automatically
 \`\`\`
 
 ## 6. Watch live events
@@ -138,7 +131,7 @@ gc context live --branch main
 
 \`\`\`bash
 gc context publish --branch main --type package_installed --key torch --value "2.1.0"
-# → Appears instantly in the live listener
+# → Appears instantly in the live listener and all sibling environments
 \`\`\`
 
 ## What's next?
@@ -237,19 +230,21 @@ Organizations in Gradient map to Clerk organizations. They provide:
         title: 'Installation',
         content: `# CLI Installation
 
-## Install from source
+## Install
 
 \`\`\`bash
-git clone https://github.com/gradient-platform/gradient
-cd gradient
-make build
-sudo cp bin/gc /usr/local/bin/gc
+# macOS / Linux
+curl -fsSL https://get.gradient.dev | sh
+
+# Or with Homebrew
+brew install gradient
 \`\`\`
 
 ## Verify installation
 
 \`\`\`bash
 gc --version
+gc auth login
 gc auth status
 \`\`\`
 
@@ -273,7 +268,7 @@ The CLI stores configuration in \`~/.gradient/config.json\`:
 \`\`\`json
 {
   "token": "your-jwt-token",
-  "api_url": "http://localhost:6767",
+  "api_url": "https://api.gradient.dev",
   "org_id": "org_xxxxx"
 }
 \`\`\``,
@@ -301,10 +296,10 @@ Show current authentication status.
 \`\`\`bash
 gc auth status
 # Status:       ✓ logged in
-# Name:         Vin Vadoothker
-# Email:        vinvadoothker@gmail.com
-# API URL:      http://localhost:6767
-# Active Org:   org_3AVtyCog7U59jeGJMDaxWgyWP3K
+# Name:         Jane Developer
+# Email:        jane@company.com
+# API URL:      https://api.gradient.dev
+# Active Org:   org_xxxxx
 \`\`\`
 
 ### Verbose mode
@@ -686,12 +681,12 @@ gc secret sync <env-id> \\
         title: 'Authentication',
         content: `# API Authentication
 
-The Gradient API requires authentication via JWT tokens from Clerk.
+The Gradient API requires authentication via JWT tokens.
 
 ## Base URL
 
 \`\`\`
-http://localhost:6767/api/v1
+https://api.gradient.dev/api/v1
 \`\`\`
 
 ## Headers
@@ -699,7 +694,6 @@ http://localhost:6767/api/v1
 | Header | Required | Description |
 |--------|----------|-------------|
 | \`Authorization\` | Yes | \`Bearer <jwt-token>\` |
-| \`X-Org-ID\` | Optional | Override organization (dev mode) |
 | \`Content-Type\` | Yes (POST) | \`application/json\` |
 
 ## Getting a token
@@ -708,7 +702,7 @@ http://localhost:6767/api/v1
 
 \`\`\`bash
 gc auth login
-TOKEN=$(cat ~/.gradient/config.json | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+# Your token is stored in ~/.gradient/config.json
 \`\`\`
 
 ### Via Clerk SDK
@@ -867,72 +861,83 @@ POST   /api/v1/environments/:id/secrets/sync   # Sync secrets
     title: 'Guides',
     pages: [
       {
-        id: 'local-dev',
-        title: 'Local Development',
-        content: `# Local Development Guide
+        id: 'getting-started-workflow',
+        title: 'Typical Workflow',
+        content: `# Typical Workflow
 
-## Prerequisites
+A step-by-step guide to using Gradient in your day-to-day development workflow.
 
-- Go 1.21+
-- Docker & Docker Compose
-- A Clerk account (for auth)
-- A Stripe account (for billing, test keys work)
-
-## Quick start
+## 1. Set up your organization
 
 \`\`\`bash
-# Clone the repo
-git clone https://github.com/gradient-platform/gradient
-cd gradient
+# Create an org for your team
+gc org create "My Team"
 
-# Copy env template
-cp .env.example .env
-# Edit .env with your Clerk and Stripe keys
-
-# Start everything
-make dev
+# Invite teammates
+gc org invite teammate@company.com
+gc org invite admin@company.com --role org:admin
 \`\`\`
 
-This runs \`scripts/dev-setup.sh\` which:
-
-1. Starts Docker Compose services (PostgreSQL, NATS, Vault)
-2. Waits for services to be healthy
-3. Runs database migrations
-4. Creates Stripe products/prices (if not already done)
-5. Builds all binaries
-6. Starts the API server on \`:6767\`
-
-## Services
-
-| Service | Port | Description |
-|---------|------|-------------|
-| API | 6767 | Main HTTP API |
-| PostgreSQL | 5432 | Database |
-| NATS | 4222 / 8222 | Message bus / monitoring |
-| Vault | 8200 | Secrets (optional) |
-| Dashboard | 5173 | Vite dev server (optional) |
-
-## Dashboard
+## 2. Connect your GitHub repo
 
 \`\`\`bash
-# Start the dashboard UI
-cd web && npm install && npm run dev
-# Available at http://localhost:5173
+# Install the Gradient GitHub App on your repo first, then:
+gc repo connect --repo myorg/myapp
 \`\`\`
 
-## What works without Hetzner
+This enables **auto-fork** — new branches automatically inherit context from their parent branch.
 
-Everything except provisioning cloud servers:
+## 3. Save initial context
 
-| Feature | Works? |
-|---------|--------|
-| Auth (login/logout/status) | ✅ |
-| Organizations | ✅ |
-| Context store | ✅ |
-| Live Context Mesh | ✅ |
-| Snapshots (metadata) | ✅ |
-| Billing | ✅ |
-| Environment provisioning | ❌ Needs HETZNER_API_TOKEN |`,
+\`\`\`bash
+gc context save --branch main --os ubuntu-24.04
+\`\`\`
+
+## 4. Create an environment
+
+\`\`\`bash
+gc env create --name dev-env --size small --region fsn1 --branch main
+\`\`\`
+
+## 5. Work inside your environment
+
+\`\`\`bash
+# SSH in
+gc env ssh <env-id>
+
+# Install packages, run tests, build — Gradient captures everything
+pip install torch numpy
+npm install -g turbo
+\`\`\`
+
+## 6. Branch and inherit
+
+\`\`\`bash
+# Create a new branch
+git checkout -b feature/new-algo
+git push origin feature/new-algo
+# → Gradient auto-forks: copies context + snapshots from main
+
+# New environments on this branch boot with main's full state
+gc env create --name algo-env --size medium --region fsn1 --branch feature/new-algo
+\`\`\`
+
+## 7. Monitor and share
+
+\`\`\`bash
+# Stream live events from your branch
+gc context live --branch main
+
+# View billing usage
+gc billing usage
+\`\`\`
+
+## What happens automatically
+
+- **Snapshots** — Every 15 minutes + on stop
+- **Package detection** — pip, npm, apt installs are tracked
+- **Context sharing** — All environments on the same branch share discoveries in real-time
+- **Billing** — Per-second usage tracking, invoiced monthly`,
       },
       {
         id: 'context-sharing',
@@ -1038,7 +1043,7 @@ Gradient includes a **Model Context Protocol (MCP)** server that allows AI agent
 ## Starting the MCP server
 
 \`\`\`bash
-./bin/gradient-mcp
+gradient-mcp
 # Accepts JSON-RPC over stdio
 \`\`\`
 
@@ -1070,7 +1075,7 @@ Add to your Cursor MCP settings:
       "command": "/path/to/gradient-mcp",
       "args": [],
       "env": {
-        "GRADIENT_API_URL": "http://localhost:6767",
+        "GRADIENT_API_URL": "https://api.gradient.dev",
         "GRADIENT_TOKEN": "your-token"
       }
     }
@@ -1426,8 +1431,9 @@ gc auth status
 Shows how to use the REST API with JWT tokens:
 
 \`\`\`bash
+gc auth login
 TOKEN=$(cat ~/.gradient/config.json | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-curl -H "Authorization: Bearer $TOKEN" http://localhost:6767/api/v1/environments
+curl -H "Authorization: Bearer $TOKEN" https://api.gradient.dev/api/v1/environments
 \`\`\`
 
 ### MCP server
