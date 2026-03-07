@@ -1,15 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { api } from '@/api/client'
 import { useFetch, useMutation, useSSE, useAPIAuth } from '@/hooks/useAPI'
-import { cn, timeAgo, EVENT_TYPES, formatDate } from '@/lib/utils'
+import { cn, timeAgo, EVENT_TYPES } from '@/lib/utils'
 import {
   Button, Card, Badge, EmptyState, CopyButton, Modal, Input, Select,
   Table, TableRow, TableCell, Skeleton, useToast, CodeBlock, StatusDot, Callout,
 } from '@/components/ui'
 import {
-  Brain, GitBranch, Package, XCircle, Lightbulb, Settings, Plus,
-  Activity, Filter, Radio, WifiOff, Network, BarChart3, Trash2,
-  Search, Terminal, Clock, ChevronRight, RefreshCw, Save, Eye,
+  Brain, GitBranch, Package, XCircle, Lightbulb, Plus,
+  Activity, Radio, Network,
+  Terminal, Clock, RefreshCw, Save,
 } from 'lucide-react'
 
 /* ─── Event Card ─── */

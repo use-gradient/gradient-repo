@@ -350,3 +350,108 @@ type GitHubInstallation struct {
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Agent Tasks: Linear + Claude Code Integration
+// ═══════════════════════════════════════════════════════════════
+
+// LinearConnection represents a Linear workspace connection for an org
+type LinearConnection struct {
+	ID              string    `json:"id"`
+	OrgID           string    `json:"org_id"`
+	AccessToken     string    `json:"-"` // never serialize
+	RefreshToken    string    `json:"-"`
+	TokenExpiresAt  *time.Time `json:"token_expires_at,omitempty"`
+	WorkspaceID     string    `json:"workspace_id,omitempty"`
+	WorkspaceName   string    `json:"workspace_name,omitempty"`
+	WebhookID       string    `json:"webhook_id,omitempty"`
+	WebhookSecret   string    `json:"-"`
+	FilterTeamIDs   []string  `json:"filter_team_ids"`
+	FilterProjectIDs []string `json:"filter_project_ids"`
+	FilterLabelNames []string `json:"filter_label_names"`
+	TriggerState    string    `json:"trigger_state"`
+	Status          string    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// ClaudeConfig represents Claude Code configuration for an org (or per-user override)
+type ClaudeConfig struct {
+	ID               string  `json:"id"`
+	OrgID            string  `json:"org_id"`
+	UserID           string  `json:"user_id,omitempty"`
+	AnthropicAPIKey  string  `json:"-"` // never serialize
+	APIKeyMasked     string  `json:"api_key_masked,omitempty"` // computed: "sk-ant-...•••"
+	Model            string  `json:"model"`
+	MaxTurns         int     `json:"max_turns"`
+	AllowedTools     []string `json:"allowed_tools"`
+	MaxCostPerTask   float64 `json:"max_cost_per_task,omitempty"`
+	MaxTokensPerTask int     `json:"max_tokens_per_task"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// MaskAPIKey returns a masked version of an API key
+func MaskAPIKey(key string) string {
+	if len(key) < 12 {
+		return "•••"
+	}
+	return key[:8] + "•••" + key[len(key)-4:]
+}
+
+// AgentTask represents a task being worked on by Claude Code
+type AgentTask struct {
+	ID               string     `json:"id"`
+	OrgID            string     `json:"org_id"`
+	LinearIssueID    string     `json:"linear_issue_id,omitempty"`
+	LinearIdentifier string     `json:"linear_identifier,omitempty"`
+	LinearURL        string     `json:"linear_url,omitempty"`
+	Title            string     `json:"title"`
+	Description      string     `json:"description,omitempty"`
+	Prompt           string     `json:"prompt,omitempty"`
+	EnvironmentID    string     `json:"environment_id,omitempty"`
+	Branch           string     `json:"branch,omitempty"`
+	RepoFullName     string     `json:"repo_full_name,omitempty"`
+	Status           string     `json:"status"` // pending, queued, running, complete, failed, cancelled
+	OutputSummary    string     `json:"output_summary,omitempty"`
+	OutputJSON       map[string]interface{} `json:"output_json,omitempty"`
+	CommitSHA        string     `json:"commit_sha,omitempty"`
+	PRURL            string     `json:"pr_url,omitempty"`
+	ErrorMessage     string     `json:"error_message,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	DurationSeconds  int        `json:"duration_seconds,omitempty"`
+	TokensUsed       int        `json:"tokens_used,omitempty"`
+	EstimatedCost    float64    `json:"estimated_cost,omitempty"`
+	RetryCount       int        `json:"retry_count"`
+	MaxRetries       int        `json:"max_retries"`
+	ContextSaved     bool       `json:"context_saved"`
+	SnapshotTaken    bool       `json:"snapshot_taken"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+// TaskLogEntry is a step in the task execution log
+type TaskLogEntry struct {
+	ID        string                 `json:"id"`
+	TaskID    string                 `json:"task_id"`
+	Step      string                 `json:"step"`
+	Status    string                 `json:"status"` // started, completed, failed
+	Message   string                 `json:"message,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+// TaskSettings holds per-org task execution preferences
+type TaskSettings struct {
+	OrgID              string `json:"org_id"`
+	InstanceStrategy   string `json:"instance_strategy"`   // one_per_task, shared_branch, single_instance, auto
+	MaxConcurrentTasks int    `json:"max_concurrent_tasks"`
+	DefaultEnvSize     string `json:"default_env_size"`
+	DefaultEnvProvider string `json:"default_env_provider"`
+	DefaultEnvRegion   string `json:"default_env_region"`
+	AutoCreatePR       bool   `json:"auto_create_pr"`
+	PRBaseBranch       string `json:"pr_base_branch"`
+	AutoDestroyEnv     bool   `json:"auto_destroy_env"`
+	EnvTTLMinutes      int    `json:"env_ttl_minutes"`
+}

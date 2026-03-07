@@ -62,7 +62,7 @@ export default function Landing() {
       <nav className="sticky top-0 z-50 w-full border-b border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60" aria-label="Site navigation">
         <div className="mx-auto flex h-14 max-w-screen-xl items-center justify-between px-4 sm:px-6 lg:px-8">
           <Link to="/" className="flex items-center gap-2.5">
-            <span className="text-primary text-xl font-bold">◇</span>
+            <img src="/logo.svg" alt="Gradient" className="h-7 w-auto" />
             <span className="text-sm font-bold text-foreground">Gradient</span>
           </Link>
           <div className="hidden md:flex items-center gap-6 text-sm text-muted-foreground">
@@ -304,10 +304,10 @@ $ gc context live --branch main
       {/* ── Footer ── */}
       <footer className="border-t border-border" role="contentinfo">
         <div className="mx-auto max-w-screen-xl px-4 sm:px-6 lg:px-8 py-12">
-          <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
             <div>
               <div className="flex items-center gap-2 mb-4">
-                <span className="text-primary text-lg font-bold">◇</span>
+                <img src="/logo.svg" alt="Gradient" className="h-6 w-auto" />
                 <span className="font-bold text-foreground">Gradient</span>
               </div>
               <p className="text-sm text-muted-foreground leading-relaxed">
@@ -330,13 +330,6 @@ $ gc context live --branch main
                 <li><Link to="/docs/api/authentication" className="transition-colors hover:text-foreground">API Reference</Link></li>
                 <li><Link to="/docs/guides/mcp-agent" className="transition-colors hover:text-foreground">MCP / AI Agents</Link></li>
                 <li><Link to="/docs/llm" className="transition-colors hover:text-foreground">LLM-friendly docs</Link></li>
-              </ul>
-            </div>
-            <div>
-              <h4 className="text-sm font-semibold text-foreground mb-4">Company</h4>
-              <ul className="space-y-3 text-sm text-muted-foreground">
-                <li><a href="https://github.com/gradient-platform" className="transition-colors hover:text-foreground">GitHub</a></li>
-                <li><a href="mailto:hello@gradient.dev" className="transition-colors hover:text-foreground">Contact</a></li>
               </ul>
             </div>
           </div>

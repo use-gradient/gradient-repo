@@ -257,7 +257,70 @@ gc billing invoices
 
 ---
 
-## 10. API Endpoints (for integrations)
+## 10. Agent Tasks (AI-Powered Development)
+
+Use Claude Code to autonomously work on Linear issues or custom tasks.
+
+```bash
+# Check integration status
+gc integration status
+
+# Configure Claude Code (your Anthropic API key)
+gc integration claude --api-key sk-ant-...
+
+# View Linear connection
+gc integration linear
+
+# Create a task manually
+gc task create --title "Add dark mode toggle" --branch feature/dark-mode
+
+# Create and auto-start
+gc task create --title "Fix auth bug" --description "SSO users can't login" --auto-start
+
+# List tasks
+gc task list
+gc task list --status running
+
+# Get task details
+gc task get <task-id>
+
+# View execution log
+gc task logs <task-id>
+
+# Start / Cancel / Retry
+gc task start <task-id>
+gc task cancel <task-id>
+gc task retry <task-id>
+
+# Statistics
+gc task stats
+```
+
+### Linear Integration
+
+1. Create an OAuth app at [linear.app/settings/api](https://linear.app/settings/api)
+2. Set `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, `LINEAR_REDIRECT_URI` in `.env`
+3. Connect via dashboard: `/dashboard/integrations`
+4. Label issues with `gradient-agent` and move to "Todo"
+5. Gradient picks them up automatically
+
+### Environment Variables for Agent Tasks
+
+```bash
+# Required for Linear integration
+LINEAR_CLIENT_ID=lin_oauth_...
+LINEAR_CLIENT_SECRET=...
+LINEAR_REDIRECT_URI=https://api.gradient.dev/api/v1/integrations/linear/callback
+
+# Claude Code config is stored per-org in the database (no env var needed)
+# Anthropic API key is set per-org via:
+#   gc integration claude --api-key sk-ant-...
+#   or via dashboard: /dashboard/integrations
+```
+
+---
+
+## 11. API Endpoints (for integrations)
 
 The API runs at `http://localhost:6767`. All endpoints except health/auth require `Authorization: Bearer <token>`.
 
@@ -268,6 +331,17 @@ curl http://localhost:6767/api/v1/health
 # List environments (with auth)
 TOKEN=$(cat ~/.gradient/config.json | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 curl -H "Authorization: Bearer $TOKEN" http://localhost:6767/api/v1/environments
+
+# Integrations
+curl -H "Authorization: Bearer $TOKEN" -H "X-Org-ID: $ORG_ID" http://localhost:6767/api/v1/integrations/linear
+curl -H "Authorization: Bearer $TOKEN" -H "X-Org-ID: $ORG_ID" http://localhost:6767/api/v1/integrations/claude
+
+# Tasks
+curl -H "Authorization: Bearer $TOKEN" -H "X-Org-ID: $ORG_ID" http://localhost:6767/api/v1/tasks
+curl -H "Authorization: Bearer $TOKEN" -H "X-Org-ID: $ORG_ID" http://localhost:6767/api/v1/tasks/<task-id>/events
+
+# Onboarding status
+curl -H "Authorization: Bearer $TOKEN" -H "X-Org-ID: $ORG_ID" http://localhost:6767/api/v1/onboarding/status
 
 # Prometheus metrics
 curl http://localhost:6767/metrics
@@ -328,6 +402,10 @@ Everything except actually provisioning servers:
 | Billing (usage/setup) | ✅ | Stripe |
 | API + Prometheus metrics | ✅ | Go server |
 | MCP server (AI agent tools) | ✅ | JSON-RPC stdio |
+| Linear integration | ✅ | Needs `LINEAR_CLIENT_ID` + `LINEAR_CLIENT_SECRET` |
+| Claude integration | ✅ | Per-org API key stored in DB |
+| Agent tasks (create/list/run) | ✅ | PostgreSQL + Claude API |
+| Onboarding wizard | ✅ | Web dashboard |
 | Environment provisioning | ❌ | Needs `HETZNER_API_TOKEN` |
 | SSH into environments | ❌ | Needs running server |
 | Agent health/snapshots | ❌ | Needs running server |

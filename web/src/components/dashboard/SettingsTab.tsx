@@ -2,13 +2,12 @@ import { useState, useCallback } from 'react'
 import { useOrganization, useOrganizationList, useUser, useClerk, CreateOrganization } from '@clerk/clerk-react'
 import { cn } from '@/lib/utils'
 import {
-  Button, Card, Badge, Input, Modal, CopyButton, Tabs, EmptyState, Select,
-  Table, TableRow, TableCell, useToast, CodeBlock, Callout, ConfirmDialog,
+  Button, Card, Badge, Input, Modal, CopyButton, Tabs, Select,
+  Table, TableRow, TableCell, useToast, CodeBlock, Callout,
 } from '@/components/ui'
 import {
-  Building2, Users, UserPlus, Crown, Shield, Mail, Send, Copy, Plus,
-  Settings, Terminal, Check, Key, RefreshCw, AlertTriangle, Trash2,
-  Container, Eye, EyeOff, Pencil, Save, ExternalLink, LogOut, ArrowRight,
+  Building2, Users, UserPlus, Crown, Mail, Send, Plus,
+  Terminal, Check, Key, Trash2,
 } from 'lucide-react'
 
 const settingsTabs = [
@@ -336,9 +335,8 @@ function CLISettings() {
             <CodeBlock code={`# macOS / Linux
 curl -fsSL https://get.gradient.dev | sh
 
-# or build from source
-git clone https://github.com/gradient-platform/gradient
-cd gradient && make install-cli`} title="Install the CLI" />
+# or via Homebrew
+brew install gradient`} title="Install the CLI" />
           </div>
           <div>
             <p className="text-[10px] text-muted-foreground mb-1">Step 2 — Authenticate</p>
@@ -365,7 +363,7 @@ TOKEN=$(cat ~/.gradient/config.json | python3 -c "import sys,json; print(json.lo
 
 # Use it
 curl -H "Authorization: Bearer $TOKEN" \\
-     http://localhost:6767/api/v1/environments`} title="API usage example" />
+     https://api.gradient.dev/api/v1/environments`} title="API usage example" />
         </div>
       </Card>
 
@@ -375,7 +373,7 @@ curl -H "Authorization: Bearer $TOKEN" \\
           Gradient includes a Model Context Protocol (MCP) server for AI agents like Claude, Cursor, and other LLM-based tools.
         </p>
         <CodeBlock code={`# Run the MCP server (stdio JSON-RPC)
-./bin/gradient-mcp
+gradient-mcp
 
 # Available tools:
 # gradient_env_create, gradient_env_list, gradient_env_status

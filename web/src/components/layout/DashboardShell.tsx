@@ -7,11 +7,13 @@ import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/ui'
 
 const tabTitles: Record<string, string> = {
-  environments: 'Environments',
-  context:      'Context Store',
-  billing:      'Billing & Usage',
-  repos:        'Repos & Snapshots',
-  settings:     'Settings',
+  environments:  'Environments',
+  tasks:         'Agent Tasks',
+  context:       'Context Store',
+  billing:       'Billing & Usage',
+  integrations:  'Integrations',
+  'get-started': 'Get Started',
+  settings:      'Settings',
 }
 
 export function DashboardShell() {

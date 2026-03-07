@@ -8,9 +8,9 @@ import {
   Table, TableRow, TableCell, Skeleton, useToast, CodeBlock, Callout,
 } from '@/components/ui'
 import {
-  CreditCard, DollarSign, Clock, Hourglass, Lock, Unlock, Zap,
+  CreditCard, DollarSign, Clock, Lock, Unlock, Zap,
   Shield, FileText, Download, ArrowRight, Terminal, Check, AlertTriangle,
-  BarChart3, Calculator, Settings,
+  BarChart3, Settings,
 } from 'lucide-react'
 
 /* ─── Free Hours Ring ─── */

@@ -34,6 +34,8 @@ Every developer has experienced this: you spin up a new dev environment, and you
 - **Live Context Mesh** — Multiple environments on the same branch share discoveries in real-time via NATS JetStream
 - **Auto Snapshots** — Automatic snapshots every 15 minutes, on git push, and on stop. Never lose work
 - **GitHub Auto-Fork** — New branches automatically inherit parent branch context and snapshots
+- **Agent Tasks** — Delegate coding tasks to Claude Code running on Gradient environments, triggered from Linear issues or manually
+- **Integrations** — Connect Linear for issue tracking and Claude Code for AI-powered task execution
 - **Smart Billing** — 20 free hours/month, per-second billing after that, with no hidden fees
 
 ## Architecture
@@ -60,6 +62,7 @@ Every developer has experienced this: you spin up a new dev environment, and you
 | Dashboard | Web UI at \`/dashboard\` |
 | REST API | HTTP endpoints at \`/api/v1/*\` |
 | MCP Server | JSON-RPC stdio for AI agents (Cursor, Claude) |
+| Agent Tasks | AI-powered task execution via Claude Code |
 
 ## Next steps
 
@@ -616,6 +619,190 @@ gc billing invoices
 - Invoiced monthly`,
       },
       {
+        id: 'task',
+        title: 'gc task',
+        content: `# gc task
+
+Agent task management commands. Tasks are executed by Claude Code on Gradient cloud environments.
+
+> **Prerequisite:** Claude Code must be configured before creating tasks. Run \`gc integration claude --api-key <key>\` first.
+
+## gc task create
+
+Create a new agent task.
+
+\`\`\`bash
+gc task create --title "Add dark mode toggle"
+gc task create --title "Fix auth bug" --description "Users can't login via SSO" --branch fix/auth-sso
+gc task create --title "Add tests" --auto-start
+gc task create --title "Refactor API" --repo myorg/myapp --branch refactor/api
+\`\`\`
+
+### Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| \`--title\` | Yes | — | Task title |
+| \`--description\` | No | — | Detailed instructions |
+| \`--branch\` | No | — | Git branch to work on |
+| \`--repo\` | No | — | Repository (owner/repo) |
+| \`--auto-start\` | No | false | Start execution immediately |
+
+## gc task list
+
+List agent tasks for the current org.
+
+\`\`\`bash
+gc task list
+gc task list --status running
+gc task list --status failed --limit 10
+\`\`\`
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| \`--status\` | — | Filter: pending, running, complete, failed, cancelled |
+| \`--limit\` | 20 | Max results |
+
+## gc task get
+
+Get detailed information about a task.
+
+\`\`\`bash
+gc task get <task-id>
+\`\`\`
+
+## gc task start
+
+Manually start a pending task.
+
+\`\`\`bash
+gc task start <task-id>
+\`\`\`
+
+## gc task cancel
+
+Cancel a running or pending task.
+
+\`\`\`bash
+gc task cancel <task-id>
+\`\`\`
+
+## gc task retry
+
+Retry a failed or cancelled task.
+
+\`\`\`bash
+gc task retry <task-id>
+\`\`\`
+
+## gc task logs
+
+View the step-by-step execution log for a task.
+
+\`\`\`bash
+gc task logs <task-id>
+# ✓ [created] Task created — just now
+# ● [execution_started] Task execution began — 2m ago
+# ✓ [queued_for_execution] Task queued for Claude Code execution — 2m ago
+\`\`\`
+
+## gc task stats
+
+Show aggregate task statistics for the current org.
+
+\`\`\`bash
+gc task stats
+# Agent Task Statistics
+# ─────────────────────
+#   Total:     12
+#   Running:   1
+#   Completed: 8
+#   Failed:    2
+#   Pending:   1
+#   Total Cost: $0.4200
+\`\`\``,
+      },
+      {
+        id: 'integration',
+        title: 'gc integration',
+        content: `# gc integration
+
+Manage third-party integrations for agent tasks.
+
+## gc integration status
+
+Show the status of all integrations for the current org.
+
+\`\`\`bash
+gc integration status
+# Integration Status
+# ──────────────────
+#   ✓ Linear:  Connected (My Workspace)
+#   ✓ Claude:  Configured (model: claude-sonnet-4-20250514)
+#   ✓ Billing: Active (paid)
+#   ✓ Repos:   2 connected
+#
+# 🚀 Agent tasks are ready!
+\`\`\`
+
+## gc integration claude
+
+Configure or view Claude Code settings.
+
+### Set API key
+
+\`\`\`bash
+gc integration claude --api-key sk-ant-api03-xxxxx
+gc integration claude --api-key sk-ant-api03-xxxxx --model claude-sonnet-4-20250514
+gc integration claude --api-key sk-ant-api03-xxxxx --max-turns 100
+\`\`\`
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| \`--api-key\` | — | Anthropic API key (\`sk-ant-...\`) |
+| \`--model\` | \`claude-sonnet-4-20250514\` | Claude model to use |
+| \`--max-turns\` | 50 | Max conversation turns per task |
+| \`--remove\` | false | Remove Claude configuration |
+
+### View current config
+
+\`\`\`bash
+gc integration claude
+# Shows current config (API key is masked)
+\`\`\`
+
+### Remove config
+
+\`\`\`bash
+gc integration claude --remove
+\`\`\`
+
+## gc integration linear
+
+View or disconnect the Linear workspace connection.
+
+> **Note:** Linear must be connected via the dashboard (OAuth flow). Use this command to check status or disconnect.
+
+### View status
+
+\`\`\`bash
+gc integration linear
+# ✓ Linear connected
+#   Workspace: My Workspace
+#   Trigger:   Issues in 'Todo' state with label matching filter
+\`\`\`
+
+### Disconnect
+
+\`\`\`bash
+gc integration linear --remove
+\`\`\``,
+      },
+      {
         id: 'other',
         title: 'Other Commands',
         content: `# Other CLI Commands
@@ -830,6 +1017,87 @@ GET    /api/v1/billing/usage                   # Usage summary
 GET    /api/v1/billing/status                  # Billing status
 POST   /api/v1/billing/setup                   # Setup Stripe
 GET    /api/v1/billing/invoices                # List invoices
+POST   /api/v1/billing/portal                  # Create Stripe portal session
+GET    /api/v1/billing/payment-method          # Get current payment method
+\`\`\`
+
+### Create portal session body
+
+\`\`\`json
+{
+  "return_url": "https://gradient.dev/dashboard/billing",
+  "flow": "payment_method_update"
+}
+\`\`\`
+
+The \`flow\` parameter is optional. Set it to \`"payment_method_update"\` to send the user directly to the payment method page in Stripe.
+
+## Agent Tasks
+
+\`\`\`
+GET    /api/v1/tasks/readiness                 # Check if org can create tasks
+POST   /api/v1/tasks                           # Create task
+GET    /api/v1/tasks                           # List tasks (?status=X&limit=N)
+GET    /api/v1/tasks/stats                     # Task statistics
+GET    /api/v1/tasks/settings                  # Get task settings
+PUT    /api/v1/tasks/settings                  # Update task settings
+GET    /api/v1/tasks/:id                       # Get task details
+POST   /api/v1/tasks/:id/start                 # Start a pending task
+POST   /api/v1/tasks/:id/cancel                # Cancel task
+POST   /api/v1/tasks/:id/retry                 # Retry failed task
+POST   /api/v1/tasks/:id/complete              # Mark complete (agent use)
+POST   /api/v1/tasks/:id/fail                  # Mark failed (agent use)
+GET    /api/v1/tasks/:id/logs                  # Execution log entries
+\`\`\`
+
+### Readiness check response
+
+\`\`\`json
+{
+  "ready": true,
+  "claude_configured": true,
+  "linear_connected": true
+}
+\`\`\`
+
+Task creation is blocked unless \`claude_configured\` is true.
+
+### Create task body
+
+\`\`\`json
+{
+  "title": "Add dark mode toggle",
+  "description": "Detailed instructions...",
+  "branch": "feature/dark-mode",
+  "repo_full_name": "myorg/myapp"
+}
+\`\`\`
+
+Append \`?auto_start=true\` to start execution immediately.
+
+## Integrations
+
+\`\`\`
+GET    /api/v1/integrations/status             # All integration statuses
+
+GET    /api/v1/integrations/linear             # Get Linear connection
+GET    /api/v1/integrations/linear/auth-url    # Get OAuth URL
+POST   /api/v1/integrations/linear/callback    # OAuth callback
+DELETE /api/v1/integrations/linear             # Disconnect Linear
+
+GET    /api/v1/integrations/claude             # Get Claude config
+PUT    /api/v1/integrations/claude             # Save Claude config
+DELETE /api/v1/integrations/claude             # Remove Claude config
+\`\`\`
+
+### Save Claude config body
+
+\`\`\`json
+{
+  "api_key": "sk-ant-api03-xxxxx",
+  "model": "claude-sonnet-4-20250514",
+  "max_turns": 50
+}
 \`\`\`
 
 ## Snapshots
@@ -1032,6 +1300,143 @@ git push origin feature/new-auth
 gc context show --branch feature/new-auth
 # Should show inherited context from main
 \`\`\``,
+      },
+      {
+        id: 'agent-tasks',
+        title: 'Agent Tasks',
+        content: `# Agent Tasks Guide
+
+Use Gradient's agent task system to delegate coding work to Claude Code. Tasks run on Gradient cloud environments with full context awareness.
+
+## Prerequisites
+
+Before creating tasks, you need:
+
+1. **Claude Code configured** — An Anthropic API key saved in Integrations
+2. **Linear connected** (optional) — For issue-driven workflows
+
+Check readiness:
+
+\`\`\`bash
+gc integration status
+\`\`\`
+
+## Setting up
+
+### 1. Configure Claude Code
+
+\`\`\`bash
+gc integration claude --api-key sk-ant-api03-xxxxx
+# ✓ Claude Code configured
+#   Model:    claude-sonnet-4-20250514
+#   API Key:  sk-ant-...xxxxx
+\`\`\`
+
+Or use the dashboard: **Integrations → Claude Code → Configure**
+
+### 2. Connect Linear (optional)
+
+Connect via the dashboard: **Integrations → Linear → Connect**
+
+This enables automatic task creation from Linear issues labeled with \`gradient-agent\`.
+
+## Creating tasks
+
+### From the CLI
+
+\`\`\`bash
+# Simple task
+gc task create --title "Add input validation to signup form"
+
+# Detailed task with auto-start
+gc task create \\
+  --title "Fix authentication bug" \\
+  --description "Users can't login via SSO. The callback URL returns 401." \\
+  --branch fix/sso-auth \\
+  --auto-start
+
+# Task for a specific repo
+gc task create \\
+  --title "Add unit tests for payment module" \\
+  --repo myorg/myapp \\
+  --branch feature/payment-tests
+\`\`\`
+
+### From the dashboard
+
+Navigate to **Tasks → New Task** and fill in the title, description, and optional branch.
+
+### From Linear
+
+1. Create an issue in Linear
+2. Add the \`gradient-agent\` label
+3. Move it to "Todo" state
+4. Gradient automatically picks it up and creates a task
+
+## Monitoring tasks
+
+### CLI
+
+\`\`\`bash
+# List all tasks
+gc task list
+
+# Filter by status
+gc task list --status running
+
+# View task details
+gc task get <task-id>
+
+# Watch execution logs
+gc task logs <task-id>
+\`\`\`
+
+### Dashboard
+
+The **Tasks** tab shows all tasks with real-time status updates. Click any task to see:
+
+- Execution log (step-by-step)
+- Output summary
+- Pull request link
+- Error details
+- Cost and duration metrics
+
+## Task lifecycle
+
+\`\`\`
+pending → running → complete
+                  → failed → (retry) → running
+        → cancelled
+\`\`\`
+
+1. **pending** — Task created, waiting to start
+2. **running** — Claude Code is executing the task
+3. **complete** — Task finished successfully
+4. **failed** — Task encountered an error (can retry)
+5. **cancelled** — Task was manually cancelled
+
+## What happens during execution
+
+When a task runs, Gradient:
+
+1. Provisions a cloud environment (or reuses one)
+2. Clones the repository and checks out the branch
+3. Loads branch context (packages, patterns, previous work)
+4. Runs Claude Code with the task prompt
+5. Saves any context discoveries back to the store
+6. Takes a snapshot of the final state
+7. Optionally creates a pull request
+8. Reports results back (and to Linear if connected)
+
+## Cost management
+
+Each task logs token usage and estimated cost. View aggregate costs with:
+
+\`\`\`bash
+gc task stats
+\`\`\`
+
+You can set cost limits per task in the Claude Code configuration (max cost per task) and control concurrency in task settings.`,
       },
       {
         id: 'mcp-agent',
@@ -1300,29 +1705,186 @@ When you click **Set up billing**, the system:
 | View invoices | \`gc billing invoices\` |`,
       },
       {
+        id: 'tasks',
+        title: 'Tasks',
+        content: `# Tasks — Dashboard
+
+The **Tasks** tab lets you create, monitor, and manage AI agent tasks powered by Claude Code.
+
+> **Prerequisite:** You must configure Claude Code in the Integrations tab before the Tasks tab becomes active. Without it, you'll see a setup prompt with a link to Integrations.
+
+## Readiness gate
+
+When you first visit the Tasks tab, Gradient checks if your org is ready to run tasks:
+
+- ✓ **Claude Code configured** (required) — Your Anthropic API key must be saved
+- ○ **Linear connected** (optional) — Enables issue-driven task creation
+
+If Claude Code isn't configured, the Tasks tab shows a setup card with links to the Integrations page. No task creation is possible until this is resolved.
+
+## Creating a task
+
+Click **New Task** to open the creation modal:
+
+1. **Title** — A concise description of what the agent should do (e.g. "Add dark mode toggle to settings page")
+2. **Description** — Detailed instructions, acceptance criteria, links to designs
+3. **Branch** (optional) — The git branch to work on
+
+Tasks can also be created automatically from Linear issues if Linear integration is connected.
+
+## Task list
+
+Each task card shows:
+
+- **Status icon** — Color-coded by state (pending, running, complete, failed, cancelled)
+- **Title** — Click to open the detail modal
+- **Status badge** — Current state
+- **Branch** — If specified
+- **Linear identifier** — If linked to a Linear issue
+- **Time** — When the task was created
+
+### Status filter
+
+Use the filter chips at the top to filter by status: All, Running, Pending, Complete, Failed.
+
+## Task detail modal
+
+Clicking a task opens a detail view with:
+
+- **Status + metadata** — Badge, branch, Linear link, creation time
+- **Description** — Full task instructions
+- **Output summary** — What the agent accomplished (after completion)
+- **Pull request link** — If the agent created a PR
+- **Error message** — If the task failed
+- **Execution metrics** — Duration, token usage, estimated cost
+- **Execution log** — Step-by-step audit trail of what happened
+
+### Actions
+
+- **Start** — Manually start a pending task
+- **Cancel** — Stop a running or pending task
+- **Retry** — Re-run a failed or cancelled task
+
+## Overview tab
+
+The Overview sub-tab shows aggregate statistics:
+
+- Total tasks, running, completed, failed counts
+- Average duration
+- Total cost
+
+## CLI equivalents
+
+| Dashboard action | CLI command |
+|-----------------|-------------|
+| Create task | \`gc task create --title "..." --description "..."\` |
+| List tasks | \`gc task list\` |
+| Start task | \`gc task start <task-id>\` |
+| Cancel task | \`gc task cancel <task-id>\` |
+| View logs | \`gc task logs <task-id>\` |
+| View stats | \`gc task stats\` |`,
+      },
+      {
+        id: 'integrations',
+        title: 'Integrations',
+        content: `# Integrations — Dashboard
+
+The **Integrations** tab is your hub for connecting third-party services that power Gradient's agent tasks and GitHub auto-fork features.
+
+## Claude Code
+
+Claude Code is the AI engine that executes agent tasks. Configuration is required before tasks can be created.
+
+### Setting up Claude Code
+
+1. Click **Configure** on the Claude Code card
+2. Enter your Anthropic API key (\`sk-ant-api03-...\`)
+3. Optionally adjust the model (default: \`claude-sonnet-4-20250514\`) and max turns (default: 50)
+4. Click **Save**
+
+Once configured, the card shows:
+
+- ✓ Connected status
+- Model name
+- API key (masked)
+- **Disconnect** button
+
+### Requirements
+
+- An Anthropic API key with access to Claude models
+- The key is stored encrypted and never displayed in full after saving
+
+## Linear
+
+Linear integration enables issue-driven agent task workflows. When a Linear issue matches your filters, Gradient automatically creates a task for it.
+
+### Connecting Linear
+
+1. Click **Connect** on the Linear card
+2. You'll be redirected to Linear's OAuth consent page
+3. Authorize Gradient to access your workspace
+4. After redirect, the connection is established
+
+Once connected, the card shows:
+
+- ✓ Connected status
+- Workspace name
+- Trigger configuration (default: issues in "Todo" state with \`gradient-agent\` label)
+- **Disconnect** button
+
+### How it works
+
+1. A developer creates a Linear issue and adds the \`gradient-agent\` label
+2. Linear sends a webhook to Gradient
+3. Gradient creates an agent task from the issue title and description
+4. Claude Code executes the task on a Gradient environment
+5. Results are posted back to the Linear issue as a comment
+
+## GitHub Repositories
+
+Repos can also be managed from this tab. Connected repos enable:
+
+- **Auto-fork** — New branches inherit parent context and snapshots
+- **Webhook listeners** — Branch events trigger context operations
+
+### Connecting a repo
+
+Enter the \`owner/repo\` format (e.g. \`myorg/myapp\`) and click **Connect**.
+
+## CLI equivalents
+
+| Dashboard action | CLI command |
+|-----------------|-------------|
+| Check all statuses | \`gc integration status\` |
+| Configure Claude | \`gc integration claude --api-key sk-ant-...\` |
+| View Claude config | \`gc integration claude\` |
+| Remove Claude | \`gc integration claude --remove\` |
+| View Linear status | \`gc integration linear\` |
+| Disconnect Linear | \`gc integration linear --remove\` |
+| Connect repo | \`gc repo connect --repo owner/repo\` |`,
+      },
+      {
         id: 'repos',
         title: 'Repos & Snapshots',
         content: `# Repos & Snapshots — Dashboard
 
-The **Repos** tab manages your connected GitHub repositories and environment snapshots.
+Repositories and snapshots are managed from the **Integrations** tab and through the CLI.
 
 ## Repositories
 
 ### Connecting a repo
 
-Click **Connect Repository** and enter the \`owner/repo\` format (e.g. \`myorg/myapp\`). This:
+Navigate to **Integrations** in the dashboard or use the CLI:
+
+\`\`\`bash
+gc repo connect --repo myorg/myapp
+\`\`\`
+
+This:
 
 1. Registers the repo with Gradient
 2. Sets up webhook listeners for branch events
 3. Enables **auto-fork** — new branches automatically inherit parent context
-
-### Connected repos list
-
-Each connected repo shows:
-- Repository name (\`owner/repo\`)
-- Connection status
-- When it was connected
-- Actions (disconnect)
 
 ### Auto-fork explained
 
@@ -1337,7 +1899,7 @@ This means feature branches don't start from scratch — they carry forward ever
 
 ## Snapshots
 
-Switch to the **Snapshots** sub-tab to see all snapshots:
+Snapshots are Docker container diffs. They are listed in the dashboard and can be created via CLI:
 
 - **Environment name** — Which environment the snapshot is from
 - **Branch** — The linked context branch
@@ -1587,6 +2149,7 @@ All events in the live context mesh follow this schema:
 | 403 | \`forbidden\` | Insufficient permissions |
 | 404 | \`not_found\` | Resource not found |
 | 409 | \`conflict\` | Resource already exists |
+| 422 | \`unprocessable_entity\` | Precondition not met (e.g. Claude not configured) |
 | 429 | \`rate_limited\` | Too many requests — try again later |
 | 500 | \`internal_error\` | Server error |
 
@@ -1597,7 +2160,14 @@ All events in the live context mesh follow this schema:
 | \`free_tier_exhausted\` | 20 free hours used this month | Add a payment method |
 | \`payment_method_required\` | Requested size requires payment | Set up billing |
 | \`size_not_allowed\` | Free tier only allows small | Upgrade or use small |
-| \`stripe_not_configured\` | Server missing Stripe keys | Configure STRIPE_SECRET_KEY |`,
+| \`stripe_not_configured\` | Server missing Stripe keys | Configure STRIPE_SECRET_KEY |
+
+## Task-specific errors
+
+| Error | Meaning | Resolution |
+|-------|---------|------------|
+| \`claude_not_configured\` | Claude Code API key not set | \`gc integration claude --api-key ...\` or configure in dashboard |
+| \`task_not_in_valid_state\` | Task can't be started/cancelled in current state | Check task status with \`gc task get <id>\` |`,
       },
     ],
   },

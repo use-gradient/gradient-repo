@@ -4,9 +4,9 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 import {
-  Server, Brain, CreditCard, GitBranch, Settings, BookOpen, Terminal,
+  Server, Brain, CreditCard, Settings, BookOpen, Terminal,
   ChevronDown, Building2, PanelLeftClose, Menu, ExternalLink,
-  Plus, Check, Crown, Users,
+  Plus, Check, Crown, Users, Bot, Plug,
 } from 'lucide-react'
 import { Badge, Modal } from '@/components/ui'
 
@@ -27,9 +27,10 @@ function OrgAvatar({ name, imageUrl, size = 'md', active }: { name: string; imag
 
 const navItems = [
   { to: '/dashboard/environments', label: 'Environments', icon: Server },
+  { to: '/dashboard/tasks',        label: 'Tasks',        icon: Bot },
   { to: '/dashboard/context',      label: 'Context',      icon: Brain },
   { to: '/dashboard/billing',      label: 'Billing',      icon: CreditCard },
-  { to: '/dashboard/repos',        label: 'Repos',        icon: GitBranch },
+  { to: '/dashboard/integrations', label: 'Integrations', icon: Plug },
   { to: '/dashboard/settings',     label: 'Settings',     icon: Settings },
 ]
 
@@ -125,7 +126,7 @@ export function Sidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
           ) : (
             <>
               <NavLink to="/" className="flex items-center gap-2.5 text-foreground hover:text-primary transition-colors" onClick={() => setMobileOpen(false)}>
-                <span className="text-primary text-xl font-bold">◇</span>
+                <img src="/logo.svg" alt="Gradient" className="h-7 w-auto" />
                 <span className="text-sm font-semibold">Gradient</span>
               </NavLink>
               <button

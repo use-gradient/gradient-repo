@@ -244,7 +244,7 @@ export default function DocsPage() {
               {mobileNavOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
             </button>
             <Link to="/" className="flex items-center gap-2 text-foreground hover:text-primary transition-colors">
-              <span className="text-primary text-lg font-bold">◇</span>
+              <img src="/logo.svg" alt="Gradient" className="h-6 w-auto" />
               <span className="text-sm font-semibold">Gradient</span>
             </Link>
             <span className="text-muted-foreground/40 text-xs">/</span>

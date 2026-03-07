@@ -1,15 +1,15 @@
 import { useState, useCallback } from 'react'
 import { api } from '@/api/client'
 import { useFetch, useMutation, usePolling, useAPIAuth } from '@/hooks/useAPI'
-import { cn, timeAgo, SIZE_LABELS, REGION_LABELS, formatDuration } from '@/lib/utils'
+import { cn, timeAgo, SIZE_LABELS, REGION_LABELS } from '@/lib/utils'
 import {
-  Button, Card, Badge, StatusDot, Modal, Input, Select, EmptyState,
+  Button, Card, Badge, StatusDot, Modal, Input, EmptyState,
   CopyButton, ConfirmDialog, Skeleton, useToast, CodeBlock, ProgressBar, Tooltip,
 } from '@/components/ui'
 import {
-  Plus, Server, Clock, MapPin, Terminal, HeartPulse, TrendingUp,
+  Plus, Server, Clock, MapPin, Terminal, HeartPulse,
   Trash2, Activity, ChevronDown, ChevronRight, Cpu, HardDrive,
-  ServerOff, Search, RefreshCw, Loader2,
+  ServerOff, Search, RefreshCw,
 } from 'lucide-react'
 
 /* ─── Create Wizard ─── */
@@ -157,7 +157,7 @@ function HealthPanel({ envId }: { envId: string }) {
 }
 
 /* ─── Environment Card ─── */
-function EnvCard({ env, onDestroy, onRefresh }: { env: any; onDestroy: (id: string) => void; onRefresh: () => void }) {
+function EnvCard({ env, onRefresh }: { env: any; onRefresh: () => void }) {
   const [expanded, setExpanded] = useState(false)
   const [showDestroy, setShowDestroy] = useState(false)
   const { mutate: destroyEnv, loading: destroying } = useMutation(
@@ -311,7 +311,7 @@ export default function Environments() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {filtered.map((env: any) => (
-            <EnvCard key={env.id} env={env} onDestroy={() => {}} onRefresh={refetch} />
+            <EnvCard key={env.id} env={env} onRefresh={refetch} />
           ))}
         </div>
       )}

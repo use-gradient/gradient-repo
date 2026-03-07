@@ -262,3 +262,145 @@ DO $$ BEGIN
     ALTER TABLE org_settings ADD COLUMN IF NOT EXISTS billing_tier VARCHAR(20) DEFAULT 'free';
 EXCEPTION WHEN others THEN NULL;
 END $$;
+
+-- ═══════════════════════════════════════════════════════════════════
+-- Agent Tasks: Linear + Claude Code Integration
+-- ═══════════════════════════════════════════════════════════════════
+
+-- Linear workspace connections (one per org)
+CREATE TABLE IF NOT EXISTS linear_connections (
+    id VARCHAR(255) PRIMARY KEY,
+    org_id VARCHAR(255) NOT NULL UNIQUE,
+
+    -- OAuth2 tokens
+    access_token TEXT NOT NULL DEFAULT '',
+    refresh_token TEXT,
+    token_expires_at TIMESTAMP,
+
+    -- Workspace info (cached from Linear API)
+    workspace_id VARCHAR(255),
+    workspace_name VARCHAR(255),
+
+    -- Webhook config
+    webhook_id VARCHAR(255),
+    webhook_secret VARCHAR(255),
+
+    -- Filter config: which issues to pick up
+    filter_team_ids JSONB DEFAULT '[]',
+    filter_project_ids JSONB DEFAULT '[]',
+    filter_label_names JSONB DEFAULT '["gradient-agent"]',
+    trigger_state VARCHAR(255) DEFAULT 'Todo',
+
+    -- Status
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Claude Code configuration (one per org, with optional per-user overrides)
+CREATE TABLE IF NOT EXISTS claude_configs (
+    id VARCHAR(255) PRIMARY KEY,
+    org_id VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255),
+
+    -- Anthropic API key
+    anthropic_api_key TEXT NOT NULL DEFAULT '',
+
+    -- Model preferences
+    model VARCHAR(100) DEFAULT 'claude-sonnet-4-20250514',
+    max_turns INTEGER DEFAULT 50,
+
+    -- Tool permissions
+    allowed_tools JSONB DEFAULT '["Edit","Write","Bash","Read"]',
+
+    -- Cost controls
+    max_cost_per_task NUMERIC(10,2),
+    max_tokens_per_task INTEGER DEFAULT 100000,
+
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+
+    UNIQUE(org_id, user_id)
+);
+
+-- Agent tasks (the core table)
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id VARCHAR(255) PRIMARY KEY,
+    org_id VARCHAR(255) NOT NULL,
+
+    -- Linear issue link
+    linear_issue_id VARCHAR(255),
+    linear_identifier VARCHAR(50),
+    linear_url VARCHAR(500),
+
+    -- Task content
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    prompt TEXT,
+
+    -- Execution
+    environment_id VARCHAR(255),
+    branch VARCHAR(255),
+    repo_full_name VARCHAR(500),
+
+    -- Status: pending, queued, running, complete, failed, cancelled
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+
+    -- Results
+    output_summary TEXT,
+    output_json JSONB,
+    commit_sha VARCHAR(40),
+    pr_url VARCHAR(500),
+    error_message TEXT,
+
+    -- Execution metadata
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    duration_seconds INTEGER,
+    tokens_used INTEGER,
+    estimated_cost NUMERIC(10,4),
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 2,
+
+    -- Context
+    context_saved BOOLEAN DEFAULT false,
+    snapshot_taken BOOLEAN DEFAULT false,
+
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_org ON agent_tasks(org_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_linear ON agent_tasks(linear_issue_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_env ON agent_tasks(environment_id);
+
+-- Task execution log (step-by-step audit log)
+CREATE TABLE IF NOT EXISTS task_execution_log (
+    id VARCHAR(255) PRIMARY KEY,
+    task_id VARCHAR(255) NOT NULL,
+    step VARCHAR(100) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    message TEXT,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_log_task ON task_execution_log(task_id, created_at);
+
+-- Org task execution settings
+CREATE TABLE IF NOT EXISTS task_settings (
+    org_id VARCHAR(255) PRIMARY KEY,
+    instance_strategy VARCHAR(50) DEFAULT 'one_per_task',
+    max_concurrent_tasks INTEGER DEFAULT 3,
+    default_env_size VARCHAR(50) DEFAULT 'small',
+    default_env_provider VARCHAR(50) DEFAULT 'hetzner',
+    default_env_region VARCHAR(100) DEFAULT 'fsn1',
+    auto_create_pr BOOLEAN DEFAULT true,
+    pr_base_branch VARCHAR(255) DEFAULT 'main',
+    auto_destroy_env BOOLEAN DEFAULT true,
+    env_ttl_minutes INTEGER DEFAULT 30,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);

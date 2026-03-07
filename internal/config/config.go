@@ -62,6 +62,11 @@ type Config struct {
 	GitHubAppID            string
 	GitHubAppWebhookSecret string
 
+	// Linear Integration (agent tasks)
+	LinearClientID     string
+	LinearClientSecret string
+	LinearRedirectURI  string
+
 	// Secrets Backends
 	VaultAddr  string
 	VaultToken string
@@ -131,6 +136,9 @@ func Load() *Config {
 		GCPRegion:              getEnv("GCP_REGION", "us-west1"),
 		GitHubAppID:            getEnv("GITHUB_APP_ID", ""),
 		GitHubAppWebhookSecret: getEnv("GITHUB_APP_WEBHOOK_SECRET", ""),
+		LinearClientID:         getEnv("LINEAR_CLIENT_ID", ""),
+		LinearClientSecret:     getEnv("LINEAR_CLIENT_SECRET", ""),
+		LinearRedirectURI:      getEnv("LINEAR_REDIRECT_URI", ""),
 		VaultAddr:              getEnv("VAULT_ADDR", ""),
 		VaultToken:             getEnv("VAULT_TOKEN", ""),
 		JWTSecret:              getEnv("JWT_SECRET", ""),

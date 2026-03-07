@@ -45,6 +45,11 @@ type Server struct {
 	// Autoscaling
 	autoscaleService *services.AutoscaleService
 
+	// Agent Tasks (Linear + Claude)
+	linearService *services.LinearService
+	claudeService *services.ClaudeService
+	taskService   *services.TaskService
+
 	// Rate limiting
 	rateLimiter *RateLimiter
 }
@@ -168,6 +173,22 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	// Start the autoscale monitoring loop (evaluates every 30 seconds)
 	autoscaleService.StartMonitor(30 * time.Second)
 
+	// Linear integration
+	linearService := services.NewLinearService(database, cfg.LinearClientID, cfg.LinearClientSecret, cfg.LinearRedirectURI)
+	if linearService.Configured() {
+		fmt.Println("[init] ✓ Linear integration configured")
+	} else {
+		fmt.Println("[init] Linear integration not configured (set LINEAR_CLIENT_ID + LINEAR_CLIENT_SECRET)")
+	}
+
+	// Claude service
+	claudeService := services.NewClaudeService(database)
+	fmt.Println("[init] ✓ Claude Code service initialized")
+
+	// Task service (orchestrator)
+	taskService := services.NewTaskService(database, envService, claudeService, linearService, contextService)
+	fmt.Println("[init] ✓ Agent task service initialized")
+
 	// Rate limiter
 	rateLimiter := NewRateLimiter(DefaultRateLimitConfig())
 
@@ -187,6 +208,9 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		eventBus:         eventBus,
 		meshPublisher:    meshPublisher,
 		autoscaleService: autoscaleService,
+		linearService:    linearService,
+		claudeService:    claudeService,
+		taskService:      taskService,
 		rateLimiter:      rateLimiter,
 	}
 }
@@ -303,6 +327,31 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 
 	// Rate limit stats
 	authenticated.HandleFunc("/admin/ratelimit", s.handleRateLimitStats).Methods("GET")
+
+	// ── Agent Tasks ──────────────────────────────────────────────────
+	authenticated.HandleFunc("/tasks", s.handleCreateTask).Methods("POST")
+	authenticated.HandleFunc("/tasks", s.handleListTasks).Methods("GET")
+	authenticated.HandleFunc("/tasks/readiness", s.handleTaskReadiness).Methods("GET")
+	authenticated.HandleFunc("/tasks/stats", s.handleTaskStats).Methods("GET")
+	authenticated.HandleFunc("/tasks/settings", s.handleGetTaskSettings).Methods("GET")
+	authenticated.HandleFunc("/tasks/settings", s.handleSaveTaskSettings).Methods("PUT")
+	authenticated.HandleFunc("/tasks/{id}", s.handleGetTask).Methods("GET")
+	authenticated.HandleFunc("/tasks/{id}/start", s.handleStartTask).Methods("POST")
+	authenticated.HandleFunc("/tasks/{id}/complete", s.handleCompleteTask).Methods("POST")
+	authenticated.HandleFunc("/tasks/{id}/fail", s.handleFailTask).Methods("POST")
+	authenticated.HandleFunc("/tasks/{id}/cancel", s.handleCancelTask).Methods("POST")
+	authenticated.HandleFunc("/tasks/{id}/retry", s.handleRetryTask).Methods("POST")
+	authenticated.HandleFunc("/tasks/{id}/logs", s.handleGetTaskLogs).Methods("GET")
+
+	// ── Integrations ─────────────────────────────────────────────────
+	authenticated.HandleFunc("/integrations/linear", s.handleGetLinearConnection).Methods("GET")
+	authenticated.HandleFunc("/integrations/linear", s.handleDeleteLinearConnection).Methods("DELETE")
+	authenticated.HandleFunc("/integrations/linear/auth-url", s.handleLinearAuthURL).Methods("GET")
+	authenticated.HandleFunc("/integrations/linear/callback", s.handleLinearCallback).Methods("POST")
+	authenticated.HandleFunc("/integrations/claude", s.handleGetClaudeConfig).Methods("GET")
+	authenticated.HandleFunc("/integrations/claude", s.handleSaveClaudeConfig).Methods("PUT")
+	authenticated.HandleFunc("/integrations/claude", s.handleDeleteClaudeConfig).Methods("DELETE")
+	authenticated.HandleFunc("/integrations/status", s.handleIntegrationStatus).Methods("GET")
 }
 
 // --- JSON helpers ---
@@ -2004,4 +2053,398 @@ body { background: #0a0a0a; color: #e5e5e5; font-family: -apple-system, sans-ser
   }
 </script>
 </body></html>`)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Agent Tasks Handlers
+// ═══════════════════════════════════════════════════════════════════════
+
+func (s *Server) handleTaskReadiness(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "missing org ID")
+		return
+	}
+	rs := s.taskService.CheckReadiness(r.Context(), orgID)
+	writeJSON(w, http.StatusOK, rs)
+}
+
+func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "missing org ID")
+		return
+	}
+
+	var req services.CreateTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "title is required")
+		return
+	}
+
+	task, err := s.taskService.CreateTask(r.Context(), orgID, req)
+	if err != nil {
+		// If it's a readiness/precondition error, return 422 not 500
+		if strings.Contains(err.Error(), "not configured") {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	// Auto-start if requested
+	autoStart := r.URL.Query().Get("auto_start")
+	if autoStart == "true" || autoStart == "1" {
+		go s.taskService.StartTaskExecution(context.Background(), orgID, task.ID)
+	}
+
+	writeJSON(w, http.StatusCreated, task)
+}
+
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "missing org ID")
+		return
+	}
+
+	status := r.URL.Query().Get("status")
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 200 {
+			limit = v
+		}
+	}
+
+	tasks, err := s.taskService.ListTasks(r.Context(), orgID, status, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tasks == nil {
+		tasks = []*models.AgentTask{}
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	task, err := s.taskService.GetTask(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	if err := s.taskService.StartTaskExecution(r.Context(), orgID, taskID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+func (s *Server) handleCompleteTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	var req services.CompleteTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := s.taskService.CompleteTask(r.Context(), orgID, taskID, req); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "completed"})
+}
+
+func (s *Server) handleFailTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	var req struct {
+		Error string `json:"error"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if err := s.taskService.FailTask(r.Context(), orgID, taskID, req.Error); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "failed"})
+}
+
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	if err := s.taskService.CancelTask(r.Context(), orgID, taskID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	task, err := s.taskService.RetryTask(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	taskID := mux.Vars(r)["id"]
+
+	logs, err := s.taskService.GetTaskLogs(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if logs == nil {
+		logs = []*models.TaskLogEntry{}
+	}
+	writeJSON(w, http.StatusOK, logs)
+}
+
+func (s *Server) handleTaskStats(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	stats, err := s.taskService.GetStats(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleGetTaskSettings(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	settings, err := s.taskService.GetSettings(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (s *Server) handleSaveTaskSettings(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	var settings models.TaskSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	settings.OrgID = orgID
+
+	if err := s.taskService.SaveSettings(r.Context(), &settings); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Integration Handlers (Linear + Claude)
+// ═══════════════════════════════════════════════════════════════════════
+
+func (s *Server) handleGetLinearConnection(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	conn, err := s.linearService.GetConnection(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if conn == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"connected": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"connected":      true,
+		"workspace_id":   conn.WorkspaceID,
+		"workspace_name": conn.WorkspaceName,
+		"status":         conn.Status,
+		"trigger_state":  conn.TriggerState,
+		"filter_labels":  conn.FilterLabelNames,
+		"created_at":     conn.CreatedAt,
+	})
+}
+
+func (s *Server) handleDeleteLinearConnection(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	if err := s.linearService.DeleteConnection(r.Context(), orgID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleLinearAuthURL(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	if !s.linearService.Configured() {
+		writeError(w, http.StatusServiceUnavailable, "Linear integration not configured")
+		return
+	}
+
+	state := orgID + ":" + uuid.New().String()
+	url := s.linearService.GetAuthURL(orgID, state)
+	writeJSON(w, http.StatusOK, map[string]string{"url": url, "state": state})
+}
+
+func (s *Server) handleLinearCallback(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	var req struct {
+		Code  string `json:"code"`
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Code == "" {
+		writeError(w, http.StatusBadRequest, "code is required")
+		return
+	}
+
+	conn, err := s.linearService.ExchangeCode(r.Context(), orgID, req.Code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"connected":      true,
+		"workspace_id":   conn.WorkspaceID,
+		"workspace_name": conn.WorkspaceName,
+	})
+}
+
+func (s *Server) handleGetClaudeConfig(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	userID := r.Header.Get("X-User-ID")
+
+	cfg, err := s.claudeService.GetConfig(r.Context(), orgID, userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"configured": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"configured":       true,
+		"api_key_masked":   cfg.APIKeyMasked,
+		"model":            cfg.Model,
+		"max_turns":        cfg.MaxTurns,
+		"allowed_tools":    cfg.AllowedTools,
+		"max_cost_per_task": cfg.MaxCostPerTask,
+	})
+}
+
+func (s *Server) handleSaveClaudeConfig(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	userID := r.Header.Get("X-User-ID")
+
+	var req struct {
+		APIKey       string   `json:"api_key"`
+		Model        string   `json:"model"`
+		MaxTurns     int      `json:"max_turns"`
+		AllowedTools []string `json:"allowed_tools"`
+		MaxCost      float64  `json:"max_cost_per_task"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	cfg, err := s.claudeService.SaveConfig(r.Context(), orgID, userID, req.APIKey, req.Model, req.MaxTurns, req.AllowedTools, req.MaxCost)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"configured":     true,
+		"api_key_masked": cfg.APIKeyMasked,
+		"model":          cfg.Model,
+		"max_turns":      cfg.MaxTurns,
+	})
+}
+
+func (s *Server) handleDeleteClaudeConfig(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+
+	if err := s.claudeService.DeleteConfig(r.Context(), orgID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	ctx := r.Context()
+
+	linearConn, _ := s.linearService.GetConnection(ctx, orgID)
+	claudeCfg, _ := s.claudeService.GetConfig(ctx, orgID, "")
+
+	// Check billing
+	hasBilling := false
+	var tier string
+	s.db.Pool.QueryRow(ctx, `SELECT COALESCE(billing_tier,'free') FROM org_settings WHERE org_id = $1`, orgID).Scan(&tier)
+	if tier == "paid" {
+		hasBilling = true
+	}
+
+	// Check repos
+	var repoCount int
+	s.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repo_connections WHERE org_id = $1`, orgID).Scan(&repoCount)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"linear": map[string]interface{}{
+			"connected":      linearConn != nil,
+			"workspace_name": func() string { if linearConn != nil { return linearConn.WorkspaceName }; return "" }(),
+		},
+		"claude": map[string]interface{}{
+			"configured":   claudeCfg != nil,
+			"model":        func() string { if claudeCfg != nil { return claudeCfg.Model }; return "" }(),
+		},
+		"billing": map[string]interface{}{
+			"active": hasBilling,
+			"tier":   tier,
+		},
+		"repos": map[string]interface{}{
+			"connected": repoCount > 0,
+			"count":     repoCount,
+		},
+		"ready": linearConn != nil && claudeCfg != nil,
+	})
 }

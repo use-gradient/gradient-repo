@@ -118,4 +118,36 @@ export const api = {
     sync: (token: string, orgId: string, envId: string, body: any) =>
       request<any>('POST', `/environments/${envId}/secrets/sync`, body, token, orgId),
   },
+
+  // ── Agent Tasks ──
+  tasks: {
+    readiness:(token: string, orgId: string) => request<{ ready: boolean; claude_configured: boolean; linear_connected: boolean; message?: string }>('GET', '/tasks/readiness', undefined, token, orgId),
+    list:     (token: string, orgId: string, params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+      return request<any[]>('GET', `/tasks${qs}`, undefined, token, orgId)
+    },
+    get:      (token: string, orgId: string, id: string) => request<any>('GET', `/tasks/${id}`, undefined, token, orgId),
+    create:   (token: string, orgId: string, body: any) => request<any>('POST', '/tasks', body, token, orgId),
+    start:    (token: string, orgId: string, id: string) => request<any>('POST', `/tasks/${id}/start`, {}, token, orgId),
+    cancel:   (token: string, orgId: string, id: string) => request<any>('POST', `/tasks/${id}/cancel`, {}, token, orgId),
+    retry:    (token: string, orgId: string, id: string) => request<any>('POST', `/tasks/${id}/retry`, {}, token, orgId),
+    logs:     (token: string, orgId: string, id: string) => request<any[]>('GET', `/tasks/${id}/logs`, undefined, token, orgId),
+    stats:    (token: string, orgId: string) => request<any>('GET', '/tasks/stats', undefined, token, orgId),
+  },
+
+  // ── Integrations ──
+  integrations: {
+    status:          (token: string, orgId: string) => request<any>('GET', '/integrations/status', undefined, token, orgId),
+    linear: {
+      get:           (token: string, orgId: string) => request<any>('GET', '/integrations/linear', undefined, token, orgId),
+      authUrl:       (token: string, orgId: string) => request<{ url: string; state: string }>('GET', '/integrations/linear/auth-url', undefined, token, orgId),
+      callback:      (token: string, orgId: string, body: { code: string; state: string }) => request<any>('POST', '/integrations/linear/callback', body, token, orgId),
+      disconnect:    (token: string, orgId: string) => request<any>('DELETE', '/integrations/linear', undefined, token, orgId),
+    },
+    claude: {
+      get:           (token: string, orgId: string) => request<any>('GET', '/integrations/claude', undefined, token, orgId),
+      save:          (token: string, orgId: string, body: any) => request<any>('PUT', '/integrations/claude', body, token, orgId),
+      disconnect:    (token: string, orgId: string) => request<any>('DELETE', '/integrations/claude', undefined, token, orgId),
+    },
+  },
 }
