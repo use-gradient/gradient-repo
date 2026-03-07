@@ -108,6 +108,7 @@ export const api = {
   // ── Repos ──
   repos: {
     list:       (token: string, orgId: string) => request<any[]>('GET', '/repos', undefined, token, orgId),
+    available:  (token: string, orgId: string) => request<{ repos: string[] }>('GET', '/repos/available', undefined, token, orgId),
     connect:    (token: string, orgId: string, body: { repo_full_name: string }) =>
       request<any>('POST', '/repos', body, token, orgId),
     disconnect: (token: string, orgId: string, id: string) => request<any>('DELETE', `/repos/${id}`, undefined, token, orgId),

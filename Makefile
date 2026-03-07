@@ -1,4 +1,4 @@
-.PHONY: dev build build-api build-cli build-mcp build-agent run-api test clean install-cli db-up db-down db-reset deps fmt vet lint setup-hetzner build-snapshot setup-nats dev-ui dev-all build-ui
+.PHONY: dev build build-api build-cli build-mcp build-agent run-api run-api-local test clean install-cli db-up db-down db-reset deps fmt vet lint setup-hetzner build-snapshot setup-nats dev-ui dev-all build-ui
 
 # ─── One-command setup ────────────────────────────────────────────────
 dev:
@@ -38,8 +38,11 @@ build-agent-linux:
 	GOOS=linux GOARCH=amd64 go build -o bin/gradient-agent-linux cmd/agent/main.go
 
 # ─── Run ─────────────────────────────────────────────────────────────
-run-api:
-	go run cmd/api/main.go
+run-api: ## Start API server with ngrok tunnel (for Linear OAuth)
+	@./scripts/run-api-with-ngrok.sh
+
+run-api-local: ## Start API server without ngrok (local-only)
+	@go run cmd/api/main.go
 
 run-mcp:
 	go run cmd/mcp/main.go

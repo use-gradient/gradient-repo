@@ -270,6 +270,7 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	// Repos (GitHub integration)
 	authenticated.HandleFunc("/repos", s.handleConnectRepo).Methods("POST")
 	authenticated.HandleFunc("/repos", s.handleListRepos).Methods("GET")
+	authenticated.HandleFunc("/repos/available", s.handleListAvailableRepos).Methods("GET")
 	authenticated.HandleFunc("/repos/{id}", s.handleDisconnectRepo).Methods("DELETE")
 
 	// Billing
@@ -865,6 +866,24 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, repos)
+}
+
+func (s *Server) handleListAvailableRepos(w http.ResponseWriter, r *http.Request) {
+	orgID := GetOrgID(r.Context())
+
+	repos, err := s.repoService.ListAvailableRepos(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if repos == nil {
+		repos = []string{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"repos": repos,
+	})
 }
 
 func (s *Server) handleDisconnectRepo(w http.ResponseWriter, r *http.Request) {
@@ -2411,6 +2430,10 @@ func (s *Server) handleDeleteClaudeConfig(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request) {
 	orgID := r.Header.Get("X-Org-ID")
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "X-Org-ID header is required")
+		return
+	}
 	ctx := r.Context()
 
 	linearConn, _ := s.linearService.GetConnection(ctx, orgID)
@@ -2419,14 +2442,16 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 	// Check billing
 	hasBilling := false
 	var tier string
-	s.db.Pool.QueryRow(ctx, `SELECT COALESCE(billing_tier,'free') FROM org_settings WHERE org_id = $1`, orgID).Scan(&tier)
-	if tier == "paid" {
+	err := s.db.Pool.QueryRow(ctx, `SELECT COALESCE(billing_tier,'free') FROM org_settings WHERE org_id = $1`, orgID).Scan(&tier)
+	if err == nil && tier == "paid" {
 		hasBilling = true
 	}
+	// Ignore errors - org might not have billing configured yet
 
 	// Check repos
 	var repoCount int
-	s.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repo_connections WHERE org_id = $1`, orgID).Scan(&repoCount)
+	_ = s.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repo_connections WHERE org_id = $1`, orgID).Scan(&repoCount)
+	// Ignore errors - might be 0 repos
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"linear": map[string]interface{}{

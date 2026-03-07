@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -541,6 +542,62 @@ func (s *RepoService) ListRepos(ctx context.Context, orgID string) ([]*models.Re
 		return nil, fmt.Errorf("error iterating repo connections: %w", err)
 	}
 	return conns, nil
+}
+
+// ListAvailableRepos returns all repos from GitHub App installations that aren't yet connected to this org
+func (s *RepoService) ListAvailableRepos(ctx context.Context, orgID string) ([]string, error) {
+	// Get all repos from GitHub installations
+	rows, err := s.db.Pool.Query(ctx, `SELECT repos FROM github_installations`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query installations: %w", err)
+	}
+	defer rows.Close()
+
+	allRepos := make(map[string]bool)
+	for rows.Next() {
+		var reposJSON []byte
+		if err := rows.Scan(&reposJSON); err != nil {
+			continue
+		}
+		var repos []string
+		if err := json.Unmarshal(reposJSON, &repos); err != nil {
+			continue
+		}
+		for _, r := range repos {
+			allRepos[r] = true
+		}
+	}
+
+	// Get repos already connected to this org
+	connectedRows, err := s.db.Pool.Query(ctx,
+		`SELECT repo_full_name FROM repo_connections WHERE org_id = $1`,
+		orgID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query connected repos: %w", err)
+	}
+	defer connectedRows.Close()
+
+	connectedRepos := make(map[string]bool)
+	for connectedRows.Next() {
+		var repoFullName string
+		if err := connectedRows.Scan(&repoFullName); err != nil {
+			continue
+		}
+		connectedRepos[repoFullName] = true
+	}
+
+	// Return repos that are available but not yet connected
+	available := make([]string, 0)
+	for repo := range allRepos {
+		if !connectedRepos[repo] {
+			available = append(available, repo)
+		}
+	}
+
+	// Sort for consistent ordering
+	sort.Strings(available)
+	return available, nil
 }
 
 // DisconnectRepo removes a repo connection

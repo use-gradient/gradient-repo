@@ -1,10 +1,10 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { api } from '@/api/client'
 import { useFetch, useMutation } from '@/hooks/useAPI'
 import { cn, timeAgo } from '@/lib/utils'
 import {
   Button, Card, Badge, Input, Modal, Skeleton, useToast, CodeBlock,
-  EmptyState, ConfirmDialog, Table, TableRow, TableCell, Tabs,
+  EmptyState, ConfirmDialog, Table, TableRow, TableCell, Tabs, Select,
 } from '@/components/ui'
 import {
   Plug, CheckCircle2, ExternalLink, Trash2,
@@ -93,19 +93,43 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
 /* ─── Connect Repo Modal ─── */
 function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClose: () => void; onConnected: () => void }) {
   const [repoName, setRepoName] = useState('')
+  const [manualInput, setManualInput] = useState(false)
   const { toast } = useToast()
   const { mutate, loading, error } = useMutation(
     (token: string, orgId: string, body: any) => api.repos.connect(token, orgId, body)
   )
+  
+  const { data: availableData, loading: loadingAvailable, refetch } = useFetch(
+    useCallback((token: string, orgId: string) => {
+      if (!open) return Promise.resolve({ repos: [] })
+      return api.repos.available(token, orgId)
+    }, [open])
+  )
+  const availableRepos = availableData?.repos || []
+
+  // Refetch when modal opens
+  useEffect(() => {
+    if (open) {
+      refetch()
+    }
+  }, [open, refetch])
 
   const handleConnect = async () => {
+    if (!repoName) return
     const result = await mutate({ repo_full_name: repoName })
     if (result) {
       toast('success', `Repository "${repoName}" connected`)
       setRepoName('')
+      setManualInput(false)
       onConnected()
       onClose()
     }
+  }
+
+  const handleInstallGitHubApp = () => {
+    window.open('https://github.com/apps/gradient', '_blank')
+    // Refetch available repos after a delay (user might install and come back)
+    setTimeout(() => refetch(), 2000)
   }
 
   return (
@@ -115,14 +139,70 @@ function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClo
       </Button>
     }>
       <div className="space-y-4">
-        <Input
-          label="Repository"
-          placeholder="owner/repo-name"
-          value={repoName}
-          onChange={e => setRepoName(e.target.value)}
-          autoFocus
-          mono
-        />
+        {loadingAvailable ? (
+          <Skeleton className="h-10 w-full" />
+        ) : availableRepos.length > 0 ? (
+          <>
+            <Select
+              label="Repository"
+              placeholder="Select a repository..."
+              value={repoName}
+              onChange={e => setRepoName(e.target.value)}
+              options={availableRepos.map(repo => ({ value: repo, label: repo }))}
+            />
+            {!manualInput && (
+              <button
+                type="button"
+                onClick={() => setManualInput(true)}
+                className="text-xs text-muted-foreground hover:text-foreground underline"
+              >
+                Or enter repository manually
+              </button>
+            )}
+          </>
+        ) : (
+          <div className="space-y-3">
+            <div className="p-4 rounded-md bg-muted/50 border border-border text-center">
+              <p className="text-sm text-muted-foreground mb-3">
+                No repositories available. Install the Gradient GitHub App to connect repositories.
+              </p>
+              <Button onClick={handleInstallGitHubApp} variant="outline" size="sm">
+                <Github className="w-3.5 h-3.5 mr-2" />
+                Install GitHub App
+                <ExternalLink className="w-3 h-3 ml-2" />
+              </Button>
+            </div>
+            {manualInput && (
+              <Input
+                label="Repository (manual entry)"
+                placeholder="owner/repo-name"
+                value={repoName}
+                onChange={e => setRepoName(e.target.value)}
+                mono
+              />
+            )}
+            {!manualInput && (
+              <button
+                type="button"
+                onClick={() => setManualInput(true)}
+                className="text-xs text-muted-foreground hover:text-foreground underline"
+              >
+                Or enter repository manually
+              </button>
+            )}
+          </div>
+        )}
+        
+        {manualInput && availableRepos.length > 0 && (
+          <Input
+            label="Repository (manual entry)"
+            placeholder="owner/repo-name"
+            value={repoName}
+            onChange={e => setRepoName(e.target.value)}
+            mono
+          />
+        )}
+        
         <p className="text-xs text-muted-foreground">
           The Gradient GitHub App must be installed on this repository. When a new branch is created,
           Gradient automatically copies the parent branch&#39;s context + snapshot pointers.

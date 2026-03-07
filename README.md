@@ -27,8 +27,11 @@ That's all you need for local dev. No Clerk, Stripe, or AWS accounts required â€
 ## After Setup
 
 ```bash
-# Start the API server
+# Start the API server (with ngrok tunnel for Linear OAuth)
 make run-api
+
+# Or start API without ngrok (for local-only development)
+make run-api-local
 
 # In another terminal â€” use the CLI
 ./bin/gc env list
@@ -40,6 +43,8 @@ curl http://localhost:6767/api/v1/health
 # Start MCP server (for AI agents)
 make run-mcp
 ```
+
+**Note:** `make run-api` automatically starts ngrok to expose your local API for Linear OAuth callbacks. The ngrok URL is automatically updated in your `.env` file as `LINEAR_REDIRECT_URI`. You can view the ngrok dashboard at http://localhost:4040.
 
 ## Running the UI
 

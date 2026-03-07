@@ -29,9 +29,13 @@ export function useFetch<T>(
   const [error, setError] = useState<string | null>(null)
   const { getAuthToken, orgId, isSignedIn } = useAPIAuth()
   const mountedRef = useRef(true)
+  const fetchingRef = useRef(false)
 
   const refetch = useCallback(async () => {
     if (!isSignedIn || !orgId) return
+    // Prevent concurrent calls
+    if (fetchingRef.current) return
+    fetchingRef.current = true
     setLoading(true)
     setError(null)
     try {
@@ -43,6 +47,7 @@ export function useFetch<T>(
       if (mountedRef.current) setError(e.message || 'Failed to fetch')
     } finally {
       if (mountedRef.current) setLoading(false)
+      fetchingRef.current = false
     }
   }, [isSignedIn, orgId, getAuthToken, fetcher, ...deps])
 
@@ -113,10 +118,20 @@ export function useSSE(url: string | null, onEvent: (data: any) => void) {
 
 /** Polling hook */
 export function usePolling(callback: () => void, intervalMs: number, enabled = true) {
+  const callbackRef = useRef(callback)
+  
+  // Keep callback ref up to date
+  useEffect(() => {
+    callbackRef.current = callback
+  }, [callback])
+
   useEffect(() => {
     if (!enabled) return
-    callback()
-    const id = setInterval(callback, intervalMs)
+    // Don't call immediately - wait for first interval to avoid duplicate calls
+    // The initial fetch is already handled by useFetch's useEffect
+    const id = setInterval(() => {
+      callbackRef.current()
+    }, intervalMs)
     return () => clearInterval(id)
-  }, [callback, intervalMs, enabled])
+  }, [intervalMs, enabled])
 }
