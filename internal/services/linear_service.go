@@ -40,16 +40,19 @@ func NewLinearService(database *db.DB, clientID, clientSecret, redirectURI strin
 }
 
 func (s *LinearService) Configured() bool {
-	return s.clientID != "" && s.clientSecret != ""
+	return s.clientID != "" && s.clientSecret != "" && s.redirectURI != ""
 }
 
 // ─── OAuth Flow ─────────────────────────────────────────────────────────
 
-func (s *LinearService) GetAuthURL(orgID, state string) string {
+func (s *LinearService) GetAuthURL(orgID, state string) (string, error) {
+	if s.redirectURI == "" {
+		return "", fmt.Errorf("LINEAR_REDIRECT_URI is not set. Run 'make run-api' to start ngrok and set it automatically")
+	}
 	return fmt.Sprintf(
 		"https://linear.app/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=read,write,issues:create&state=%s",
 		s.clientID, s.redirectURI, state,
-	)
+	), nil
 }
 
 func (s *LinearService) ExchangeCode(ctx context.Context, orgID, code string) (*models.LinearConnection, error) {

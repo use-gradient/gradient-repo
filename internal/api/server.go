@@ -2329,12 +2329,16 @@ func (s *Server) handleLinearAuthURL(w http.ResponseWriter, r *http.Request) {
 	orgID := r.Header.Get("X-Org-ID")
 
 	if !s.linearService.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "Linear integration not configured")
+		writeError(w, http.StatusServiceUnavailable, "Linear integration not configured. Set LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, and LINEAR_REDIRECT_URI in .env")
 		return
 	}
 
 	state := orgID + ":" + uuid.New().String()
-	url := s.linearService.GetAuthURL(orgID, state)
+	url, err := s.linearService.GetAuthURL(orgID, state)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"url": url, "state": state})
 }
 
