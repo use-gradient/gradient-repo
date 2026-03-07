@@ -37,10 +37,6 @@ fi
 
 # Read NGROK_DOMAIN from .env (optional, for static domains)
 NGROK_DOMAIN=$(grep "^NGROK_DOMAIN=" .env 2>/dev/null | cut -d= -f2- || echo "")
-if [ -z "$NGROK_DOMAIN" ]; then
-  # Default to 6767-gradient if not specified
-  NGROK_DOMAIN="6767-gradient"
-fi
 
 # Check if ngrok is already running
 if curl -sf http://localhost:4040/api/tunnels >/dev/null 2>&1; then
@@ -48,48 +44,94 @@ if curl -sf http://localhost:4040/api/tunnels >/dev/null 2>&1; then
   warn "Using existing ngrok instance. If you need a fresh tunnel, stop it first."
   NGROK_PID=""
 else
-  # Start ngrok in background with custom domain
-  # Try using --domain flag (works with ngrok free accounts if domain is configured)
-  info "Starting ngrok tunnel on port $PORT with domain: $NGROK_DOMAIN..."
-  ngrok http "$PORT" --domain="$NGROK_DOMAIN" > /tmp/ngrok.log 2>&1 &
-  NGROK_PID=$!
-  
-  # Wait a moment to check if it started successfully
-  sleep 2
-  if ! kill -0 $NGROK_PID 2>/dev/null; then
-    # Process died, likely domain doesn't exist - fallback to random domain
-    warn "Failed to use domain '$NGROK_DOMAIN' (may require ngrok account setup)"
-    warn "Falling back to random domain..."
+  # Start ngrok in background
+  if [ -n "$NGROK_DOMAIN" ]; then
+    # Try using custom domain (requires paid ngrok account or configured domain)
+    info "Starting ngrok tunnel on port $PORT with domain: $NGROK_DOMAIN..."
+    ngrok http "$PORT" --domain="$NGROK_DOMAIN" > /tmp/ngrok.log 2>&1 &
+    NGROK_PID=$!
+    
+    # Wait a moment to check if it started successfully
+    sleep 3
+    if ! kill -0 $NGROK_PID 2>/dev/null || grep -q "ERR_NGROK\|failed\|error" /tmp/ngrok.log 2>/dev/null; then
+      # Process died or error occurred, likely domain doesn't exist - fallback to random domain
+      warn "Failed to use domain '$NGROK_DOMAIN' (may require ngrok account setup)"
+      warn "Falling back to random domain..."
+      kill $NGROK_PID 2>/dev/null || true
+      wait $NGROK_PID 2>/dev/null || true
+      ngrok http "$PORT" > /tmp/ngrok.log 2>&1 &
+      NGROK_PID=$!
+      sleep 4
+    else
+      info "Using custom domain: $NGROK_DOMAIN"
+    fi
+  else
+    # Use random domain (free tier)
+    info "Starting ngrok tunnel on port $PORT (random domain)..."
     ngrok http "$PORT" > /tmp/ngrok.log 2>&1 &
     NGROK_PID=$!
+    sleep 4
   fi
   
-  # Wait for ngrok to start
+  # Wait for ngrok to fully start
   info "Waiting for ngrok to start..."
-  sleep 3
+  sleep 2
 fi
 
 # Try to get ngrok URL from API (ngrok web interface)
 NGROK_URL=""
-for i in {1..10}; do
-  NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | \
-    python3 -c "import sys, json; data = json.load(sys.stdin); tunnels = data.get('tunnels', []); print(tunnels[0]['public_url'] if tunnels else '')" 2>/dev/null || echo "")
+for i in {1..15}; do
+  # Wait a bit longer for ngrok to fully start
+  sleep 1
+  
+  # Try to get URL from ngrok API
+  API_RESPONSE=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "")
+  if [ -n "$API_RESPONSE" ]; then
+    NGROK_URL=$(echo "$API_RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    tunnels = data.get('tunnels', [])
+    if tunnels:
+        # Get the first HTTPS tunnel (prefer https over http)
+        for t in tunnels:
+            url = t.get('public_url', '')
+            if url.startswith('https://'):
+                print(url)
+                break
+        else:
+            # Fallback to first tunnel if no HTTPS
+            print(tunnels[0].get('public_url', ''))
+except:
+    pass
+" 2>/dev/null || echo "")
+  fi
   
   if [ -n "$NGROK_URL" ]; then
     break
   fi
-  sleep 1
 done
 
 if [ -z "$NGROK_URL" ]; then
   # Fallback: try to parse from ngrok log (macOS-compatible)
-  NGROK_URL=$(grep -oE 'https://[a-z0-9]+\.ngrok(-free)?\.app' /tmp/ngrok.log 2>/dev/null | head -1 || echo "")
+  # Look for various ngrok URL patterns
+  NGROK_URL=$(grep -oE 'https://[a-z0-9-]+\.(ngrok(-free)?\.app|ngrok\.io)' /tmp/ngrok.log 2>/dev/null | head -1 || echo "")
+  
+  # Also try checking the ngrok web interface directly
+  if [ -z "$NGROK_URL" ]; then
+    NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.(ngrok(-free)?\.app|ngrok\.io)' | head -1 || echo "")
+  fi
 fi
 
 if [ -z "$NGROK_URL" ]; then
-  warn "Could not automatically detect ngrok URL. Please check http://localhost:4040 for the URL."
-  warn "You can manually update LINEAR_REDIRECT_URI in .env with: https://your-ngrok-id.ngrok.io/api/v1/integrations/linear/callback"
-  NGROK_URL="https://your-ngrok-id.ngrok.io"
+  warn "Could not automatically detect ngrok URL."
+  warn "Please:"
+  warn "  1. Open http://localhost:4040 in your browser"
+  warn "  2. Copy the 'Forwarding' URL (e.g., https://xxxx.ngrok-free.app)"
+  warn "  3. Update .env: LINEAR_REDIRECT_URI=https://xxxx.ngrok-free.app/api/v1/integrations/linear/callback"
+  warn ""
+  warn "Or set NGROK_DOMAIN= in .env to use a custom domain (requires paid ngrok account)"
+  NGROK_URL=""
 else
   info "ngrok URL: $NGROK_URL"
   
@@ -108,7 +150,10 @@ else
   fi
   
   info "Updated LINEAR_REDIRECT_URI in .env: $LINEAR_REDIRECT_URI"
-  info "Update your Linear OAuth app callback URL to: $LINEAR_REDIRECT_URI"
+  info ""
+  info "⚠️  IMPORTANT: Update your Linear OAuth app callback URL to:"
+  info "   $LINEAR_REDIRECT_URI"
+  info ""
 fi
 
 # Cleanup function
