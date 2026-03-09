@@ -8,15 +8,26 @@ export function useAPIAuth() {
   const { getToken, isSignedIn, orgId: sessionOrgId } = useAuth()
   const { organization } = useOrganization()
   const { setActive } = useOrganizationList()
-  const orgId = organization?.id || (IS_DEV ? (import.meta.env.VITE_DEV_ORG_ID || 'dev-org') : '')
+  const [ready, setReady] = useState(IS_DEV)
 
-  // Ensure the session is scoped to the active org. Clerk JWTs only
-  // include org_id when setActive({ organization }) has been called.
+  const orgId = IS_DEV
+    ? (import.meta.env.VITE_DEV_ORG_ID || 'dev-org')
+    : sessionOrgId || ''
+
+  // Scope the session to the active org. Clerk JWTs only include org_id
+  // after setActive({ organization }) completes. Block API calls until done.
   useEffect(() => {
-    if (IS_DEV || !organization?.id || !setActive) return
-    if (sessionOrgId !== organization.id) {
-      setActive({ organization: organization.id })
+    if (IS_DEV) return
+    if (!organization?.id || !setActive) {
+      setReady(false)
+      return
     }
+    if (sessionOrgId === organization.id) {
+      setReady(true)
+      return
+    }
+    setReady(false)
+    setActive({ organization: organization.id }).then(() => setReady(true))
   }, [organization?.id, sessionOrgId, setActive])
 
   const getAuthToken = useCallback(async () => {
@@ -28,7 +39,7 @@ export function useAPIAuth() {
     }
   }, [getToken])
 
-  return { getAuthToken, orgId, isSignedIn: isSignedIn || IS_DEV }
+  return { getAuthToken, orgId, isSignedIn: (isSignedIn && ready) || IS_DEV }
 }
 
 /** Generic data fetching hook */
