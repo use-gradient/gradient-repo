@@ -8,11 +8,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var Version = "dev"
+
 func main() {
 	var rootCmd = &cobra.Command{
-		Use:   "gc",
-		Short: "Gradient CLI — The Infrastructure Platform That AI Agents Can Actually Use",
-		Long:  "Gradient CLI for managing environments, contexts, snapshots, repos, secrets, and billing across cloud providers.",
+		Use:     "gc",
+		Short:   "Gradient CLI — The Infrastructure Platform That AI Agents Can Actually Use",
+		Long:    "Gradient CLI for managing environments, contexts, snapshots, repos, secrets, and billing across cloud providers.",
+		Version: Version,
 	}
 
 	rootCmd.AddCommand(commands.NewEnvCmd())

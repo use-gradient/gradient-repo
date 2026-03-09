@@ -20,10 +20,11 @@ import (
 
 // RepoService handles GitHub App webhooks and auto-fork logic
 type RepoService struct {
-	db             *db.DB
-	envService     *EnvService
-	webhookSecret  string
-	snapshotDB     *SnapshotStore
+	db            *db.DB
+	envService    *EnvService
+	webhookSecret string
+	snapshotDB    *SnapshotStore
+	github        *GitHubService
 }
 
 // SnapshotStore wraps DB operations for snapshots
@@ -42,6 +43,11 @@ func NewRepoService(database *db.DB, envService *EnvService, webhookSecret strin
 		webhookSecret: webhookSecret,
 		snapshotDB:    NewSnapshotStore(database),
 	}
+}
+
+// SetGitHubService wires in the GitHub OAuth service (called after both are constructed).
+func (s *RepoService) SetGitHubService(gh *GitHubService) {
+	s.github = gh
 }
 
 // VerifyWebhookSignature verifies the GitHub webhook HMAC-SHA256 signature
@@ -447,79 +453,66 @@ func (s *RepoService) handleBranchDelete(ctx context.Context, payload json.RawMe
 
 // --- Repo connection management ---
 
-// ConnectRepo links a GitHub repo to a Gradient org
+// ConnectRepo links a GitHub repo to a Gradient org.
+// Uses the stored GitHub OAuth token to create a webhook on the repo.
 func (s *RepoService) ConnectRepo(ctx context.Context, orgID, repoFullName string) (*models.RepoConnection, error) {
-	// Look up the GitHub installation that has this repo
-	var installationID int64
-	var reposJSON []byte
+	if s.github == nil {
+		return nil, fmt.Errorf("GitHub OAuth not configured")
+	}
 
-	rows, err := s.db.Pool.Query(ctx, `SELECT installation_id, repos FROM github_installations`)
+	ghConn, err := s.github.GetConnection(ctx, orgID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query installations: %w", err)
+		return nil, fmt.Errorf("failed to check GitHub connection: %w", err)
 	}
-	defer rows.Close()
-
-	found := false
-	for rows.Next() {
-		if err := rows.Scan(&installationID, &reposJSON); err != nil {
-			continue
-		}
-		var repos []string
-		if err := json.Unmarshal(reposJSON, &repos); err != nil {
-			continue
-		}
-		for _, r := range repos {
-			if r == repoFullName {
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
+	if ghConn == nil {
+		return nil, fmt.Errorf("GitHub not connected — run `gc repo auth` or connect GitHub in the dashboard first")
 	}
 
-	if !found {
-		return nil, fmt.Errorf("repo %s not found in any GitHub App installation — install the Gradient GitHub App first: https://github.com/apps/gradient", repoFullName)
+	// Create a webhook on the repo so we receive push/create/delete events
+	var webhookID int64
+	webhookID, err = s.github.CreateWebhook(ctx, orgID, repoFullName, s.webhookSecret)
+	if err != nil {
+		log.Printf("[repo] Warning: could not create webhook on %s: %v (auto-fork may not work until webhook is set up)", repoFullName, err)
 	}
 
 	connID := uuid.New().String()
 	conn := &models.RepoConnection{
 		ID:                 connID,
 		OrgID:              orgID,
-		InstallationID:     installationID,
 		RepoFullName:       repoFullName,
 		DefaultBranch:      "main",
 		AutoForkEnabled:    true,
 		AutoSnapshotOnPush: true,
+		WebhookID:          webhookID,
 		CreatedAt:          time.Now(),
 	}
 
 	query := `
-		INSERT INTO repo_connections (id, org_id, installation_id, repo_full_name, default_branch, auto_fork_enabled, auto_snapshot_on_push, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO repo_connections (id, org_id, installation_id, repo_full_name, default_branch, auto_fork_enabled, auto_snapshot_on_push, webhook_id, created_at)
+		VALUES ($1, $2, 0, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (org_id, repo_full_name) DO UPDATE SET
-			installation_id = EXCLUDED.installation_id,
 			auto_fork_enabled = EXCLUDED.auto_fork_enabled,
-			auto_snapshot_on_push = EXCLUDED.auto_snapshot_on_push
+			auto_snapshot_on_push = EXCLUDED.auto_snapshot_on_push,
+			webhook_id = EXCLUDED.webhook_id
 		RETURNING id
 	`
 	err = s.db.Pool.QueryRow(ctx, query,
-		conn.ID, conn.OrgID, conn.InstallationID, conn.RepoFullName,
-		conn.DefaultBranch, conn.AutoForkEnabled, conn.AutoSnapshotOnPush, conn.CreatedAt,
+		conn.ID, conn.OrgID, conn.RepoFullName,
+		conn.DefaultBranch, conn.AutoForkEnabled, conn.AutoSnapshotOnPush, conn.WebhookID, conn.CreatedAt,
 	).Scan(&conn.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save repo connection: %w", err)
 	}
 
-	log.Printf("[repo] Connected repo %s to org %s (installation %d)", repoFullName, orgID, installationID)
+	log.Printf("[repo] Connected repo %s to org %s (webhook %d)", repoFullName, orgID, webhookID)
 	return conn, nil
 }
 
 // ListRepos returns all repo connections for an org
 func (s *RepoService) ListRepos(ctx context.Context, orgID string) ([]*models.RepoConnection, error) {
 	query := `
-		SELECT id, org_id, installation_id, repo_full_name, default_branch, auto_fork_enabled, auto_snapshot_on_push, created_at
+		SELECT id, org_id, installation_id, repo_full_name, default_branch,
+			auto_fork_enabled, auto_snapshot_on_push, COALESCE(webhook_id, 0), created_at
 		FROM repo_connections
 		WHERE org_id = $1
 		ORDER BY created_at DESC
@@ -533,7 +526,8 @@ func (s *RepoService) ListRepos(ctx context.Context, orgID string) ([]*models.Re
 	var conns []*models.RepoConnection
 	for rows.Next() {
 		var c models.RepoConnection
-		if err := rows.Scan(&c.ID, &c.OrgID, &c.InstallationID, &c.RepoFullName, &c.DefaultBranch, &c.AutoForkEnabled, &c.AutoSnapshotOnPush, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.OrgID, &c.InstallationID, &c.RepoFullName, &c.DefaultBranch,
+			&c.AutoForkEnabled, &c.AutoSnapshotOnPush, &c.WebhookID, &c.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan repo connection: %w", err)
 		}
 		conns = append(conns, &c)
@@ -544,28 +538,16 @@ func (s *RepoService) ListRepos(ctx context.Context, orgID string) ([]*models.Re
 	return conns, nil
 }
 
-// ListAvailableRepos returns all repos from GitHub App installations that aren't yet connected to this org
+// ListAvailableRepos returns repos the user has access to via GitHub OAuth that aren't yet connected.
 func (s *RepoService) ListAvailableRepos(ctx context.Context, orgID string) ([]string, error) {
-	// Get all repos from GitHub installations
-	rows, err := s.db.Pool.Query(ctx, `SELECT repos FROM github_installations`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query installations: %w", err)
+	if s.github == nil {
+		return nil, nil
 	}
-	defer rows.Close()
 
-	allRepos := make(map[string]bool)
-	for rows.Next() {
-		var reposJSON []byte
-		if err := rows.Scan(&reposJSON); err != nil {
-			continue
-		}
-		var repos []string
-		if err := json.Unmarshal(reposJSON, &repos); err != nil {
-			continue
-		}
-		for _, r := range repos {
-			allRepos[r] = true
-		}
+	// Fetch all repos from GitHub API using the user's OAuth token
+	allRepos, err := s.github.ListUserRepos(ctx, orgID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get repos already connected to this org
@@ -589,19 +571,39 @@ func (s *RepoService) ListAvailableRepos(ctx context.Context, orgID string) ([]s
 
 	// Return repos that are available but not yet connected
 	available := make([]string, 0)
-	for repo := range allRepos {
+	for _, repo := range allRepos {
 		if !connectedRepos[repo] {
 			available = append(available, repo)
 		}
 	}
 
-	// Sort for consistent ordering
 	sort.Strings(available)
 	return available, nil
 }
 
-// DisconnectRepo removes a repo connection
+// DisconnectRepo removes a repo connection and cleans up the webhook.
 func (s *RepoService) DisconnectRepo(ctx context.Context, orgID, connID string) error {
+	// Fetch the connection to get webhook ID and repo name for cleanup
+	var repoFullName string
+	var webhookID *int64
+	err := s.db.Pool.QueryRow(ctx,
+		`SELECT repo_full_name, webhook_id FROM repo_connections WHERE id = $1 AND org_id = $2`,
+		connID, orgID,
+	).Scan(&repoFullName, &webhookID)
+	if err == pgx.ErrNoRows {
+		return fmt.Errorf("repo connection not found")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to look up repo connection: %w", err)
+	}
+
+	// Delete the webhook from GitHub if we have a webhook ID
+	if s.github != nil && webhookID != nil && *webhookID != 0 {
+		if delErr := s.github.DeleteWebhook(ctx, orgID, repoFullName, *webhookID); delErr != nil {
+			log.Printf("[repo] Warning: failed to delete webhook %d on %s: %v", *webhookID, repoFullName, delErr)
+		}
+	}
+
 	cmdTag, err := s.db.Pool.Exec(ctx,
 		`DELETE FROM repo_connections WHERE id = $1 AND org_id = $2`,
 		connID, orgID,

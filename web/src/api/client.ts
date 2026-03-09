@@ -1,4 +1,6 @@
-const API_BASE = '/api/v1'
+const API_BASE = import.meta.env.VITE_API_URL
+  ? `${import.meta.env.VITE_API_URL}/api/v1`
+  : '/api/v1'
 
 export class APIError extends Error {
   constructor(public status: number, message: string) {
@@ -6,6 +8,8 @@ export class APIError extends Error {
     this.name = 'APIError'
   }
 }
+
+const IS_DEV = import.meta.env.DEV
 
 async function request<T>(
   method: string,
@@ -15,8 +19,15 @@ async function request<T>(
   orgId?: string | null,
 ): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) headers['Authorization'] = `Bearer ${token}`
-  if (orgId) headers['X-Org-ID'] = orgId
+  if (token && token !== 'dev-token') {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  if (IS_DEV) {
+    headers['X-User-ID'] = import.meta.env.VITE_DEV_USER_ID || 'dev-user'
+    headers['X-Org-ID'] = orgId || import.meta.env.VITE_DEV_ORG_ID || 'dev-org'
+  } else if (orgId) {
+    headers['X-Org-ID'] = orgId
+  }
 
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -109,7 +120,7 @@ export const api = {
   repos: {
     list:       (token: string, orgId: string) => request<any[]>('GET', '/repos', undefined, token, orgId),
     available:  (token: string, orgId: string) => request<{ repos: string[] }>('GET', '/repos/available', undefined, token, orgId),
-    connect:    (token: string, orgId: string, body: { repo_full_name: string }) =>
+    connect:    (token: string, orgId: string, body: { repo: string }) =>
       request<any>('POST', '/repos', body, token, orgId),
     disconnect: (token: string, orgId: string, id: string) => request<any>('DELETE', `/repos/${id}`, undefined, token, orgId),
   },
@@ -149,6 +160,12 @@ export const api = {
       get:           (token: string, orgId: string) => request<any>('GET', '/integrations/claude', undefined, token, orgId),
       save:          (token: string, orgId: string, body: any) => request<any>('PUT', '/integrations/claude', body, token, orgId),
       disconnect:    (token: string, orgId: string) => request<any>('DELETE', '/integrations/claude', undefined, token, orgId),
+    },
+    github: {
+      get:           (token: string, orgId: string) => request<any>('GET', '/integrations/github', undefined, token, orgId),
+      authUrl:       (token: string, orgId: string) => request<{ url: string; state: string }>('GET', '/integrations/github/auth-url', undefined, token, orgId),
+      callback:      (token: string, orgId: string, body: { code: string; state: string }) => request<any>('POST', '/integrations/github/callback', body, token, orgId),
+      disconnect:    (token: string, orgId: string) => request<any>('DELETE', '/integrations/github', undefined, token, orgId),
     },
   },
 }

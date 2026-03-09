@@ -176,7 +176,7 @@ function PublishForm({ selectedBranch }: { selectedBranch: string }) {
 
   const handlePublish = async () => {
     let data: any = {}
-    if (eventType === 'package_installed') data = { manager: key, name: value }
+    if (eventType === 'package_installed') data = { manager: 'manual', name: key, version: value }
     else if (eventType === 'test_failed') data = { test: key, error: value }
     else if (eventType === 'pattern_learned') data = { key, value }
     else if (eventType === 'config_changed') data = { key, value }

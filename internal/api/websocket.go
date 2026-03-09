@@ -35,6 +35,10 @@ func (s *Server) handleWebSocketEvents(w http.ResponseWriter, r *http.Request) {
 	envIDFilter := r.URL.Query().Get("env_id")
 	typeFilter := r.URL.Query().Get("type")
 
+	// Disable server WriteTimeout before upgrading — WebSocket connections are long-lived
+	rc := http.NewResponseController(w)
+	rc.SetWriteDeadline(time.Time{})
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[ws] upgrade failed: %v", err)

@@ -337,7 +337,7 @@ export default function OnboardingWizard() {
         </p>
         <div className="space-y-2">
           <CodeBlock code={`# Install & auth
-curl -fsSL https://get.gradient.dev | sh
+curl -fsSL https://raw.githubusercontent.com/use-gradient/gradient-repo/main/scripts/install.sh | sh
 gc auth login
 
 # Connect Linear (in Linear settings, install the Gradient app)

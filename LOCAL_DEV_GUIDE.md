@@ -165,7 +165,7 @@ gc context publish --branch main --type test_failed --key "test_model" --value "
 # Query event history
 gc context events --branch main
 #   [05:53:16] package_installed    env=cli          seq=1
-#          {"manager":"torch","name":"2.1.0"}
+#          {"manager":"manual","name":"torch","version":"2.1.0"}
 #   [05:53:16] pattern_learned      env=cli          seq=2
 #          {"key":"oom_fix","value":"Reduce batch_size to 32 when GPU OOMs at 64"}
 
@@ -310,7 +310,7 @@ gc task stats
 # Required for Linear integration
 LINEAR_CLIENT_ID=lin_oauth_...
 LINEAR_CLIENT_SECRET=...
-LINEAR_REDIRECT_URI=https://api.gradient.dev/api/v1/integrations/linear/callback
+LINEAR_REDIRECT_URI=https://api.usegradient.dev/api/v1/integrations/linear/callback
 
 # Claude Code config is stored per-org in the database (no env var needed)
 # Anthropic API key is set per-org via:

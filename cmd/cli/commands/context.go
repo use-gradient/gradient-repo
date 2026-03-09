@@ -500,7 +500,7 @@ func NewContextPublishCmd() *cobra.Command {
 			case "config_changed":
 				data = map[string]string{"key": key, "value": value}
 			case "package_installed", "package_removed":
-				data = map[string]string{"manager": key, "name": value}
+				data = map[string]string{"manager": "manual", "name": key, "version": value}
 			case "test_failed":
 				data = map[string]string{"test": key, "error": value}
 			case "test_fixed":

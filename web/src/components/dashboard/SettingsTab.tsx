@@ -333,10 +333,10 @@ function CLISettings() {
           <div>
             <p className="text-[10px] text-muted-foreground mb-1">Step 1 — Install</p>
             <CodeBlock code={`# macOS / Linux
-curl -fsSL https://get.gradient.dev | sh
+curl -fsSL https://raw.githubusercontent.com/use-gradient/gradient-repo/main/scripts/install.sh | sh
 
-# or via Homebrew
-brew install gradient`} title="Install the CLI" />
+# Or download from GitHub Releases:
+# https://github.com/use-gradient/gradient-repo/releases`} title="Install the CLI" />
           </div>
           <div>
             <p className="text-[10px] text-muted-foreground mb-1">Step 2 — Authenticate</p>
@@ -363,7 +363,7 @@ TOKEN=$(cat ~/.gradient/config.json | python3 -c "import sys,json; print(json.lo
 
 # Use it
 curl -H "Authorization: Bearer $TOKEN" \\
-     https://api.gradient.dev/api/v1/environments`} title="API usage example" />
+     https://api.usegradient.dev/api/v1/environments`} title="API usage example" />
         </div>
       </Card>
 

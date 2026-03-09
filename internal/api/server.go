@@ -45,6 +45,9 @@ type Server struct {
 	// Autoscaling
 	autoscaleService *services.AutoscaleService
 
+	// GitHub OAuth
+	githubService *services.GitHubService
+
 	// Agent Tasks (Linear + Claude)
 	linearService *services.LinearService
 	claudeService *services.ClaudeService
@@ -125,6 +128,13 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		}
 	}
 	repoService := services.NewRepoService(database, envService, cfg.GitHubAppWebhookSecret)
+	githubService := services.NewGitHubService(database, cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret, cfg.GitHubOAuthRedirectURI, cfg.APIURL)
+	repoService.SetGitHubService(githubService)
+	if githubService.Configured() {
+		fmt.Println("[init] ✓ GitHub OAuth configured")
+	} else {
+		fmt.Println("[init] GitHub OAuth not configured (set GITHUB_OAUTH_CLIENT_ID + GITHUB_OAUTH_CLIENT_SECRET)")
+	}
 	orgService := services.NewOrgService(cfg.ClerkSecretKey)
 	snapshotStore := services.NewSnapshotStore(database)
 	authMiddleware := NewAuthMiddleware(cfg.Env, cfg.ClerkSecretKey, cfg.ClerkPEMPublicKey, cfg.ClerkJWKSURL, cfg.JWTSecret)
@@ -199,6 +209,7 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		contextService:   contextService,
 		billingService:   billingService,
 		repoService:      repoService,
+		githubService:    githubService,
 		orgService:       orgService,
 		snapshotStore:    snapshotStore,
 		authMiddleware:   authMiddleware,
@@ -349,6 +360,10 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	authenticated.HandleFunc("/integrations/linear", s.handleDeleteLinearConnection).Methods("DELETE")
 	authenticated.HandleFunc("/integrations/linear/auth-url", s.handleLinearAuthURL).Methods("GET")
 	authenticated.HandleFunc("/integrations/linear/callback", s.handleLinearCallback).Methods("POST")
+	authenticated.HandleFunc("/integrations/github", s.handleGetGitHubConnection).Methods("GET")
+	authenticated.HandleFunc("/integrations/github", s.handleDeleteGitHubConnection).Methods("DELETE")
+	authenticated.HandleFunc("/integrations/github/auth-url", s.handleGitHubAuthURL).Methods("GET")
+	authenticated.HandleFunc("/integrations/github/callback", s.handleGitHubCallback).Methods("POST")
 	authenticated.HandleFunc("/integrations/claude", s.handleGetClaudeConfig).Methods("GET")
 	authenticated.HandleFunc("/integrations/claude", s.handleSaveClaudeConfig).Methods("PUT")
 	authenticated.HandleFunc("/integrations/claude", s.handleDeleteClaudeConfig).Methods("DELETE")
@@ -1778,6 +1793,12 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Disable the server's WriteTimeout for this long-lived SSE connection.
+	// Without this, the default 15s WriteTimeout kills the stream before
+	// the first keepalive (30s) fires.
+	rc := http.NewResponseController(w)
+	rc.SetWriteDeadline(time.Time{})
+
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -2370,6 +2391,75 @@ func (s *Server) handleLinearCallback(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── GitHub OAuth Handlers ────────────────────────────────────────────
+
+func (s *Server) handleGetGitHubConnection(w http.ResponseWriter, r *http.Request) {
+	orgID := GetOrgID(r.Context())
+	conn, err := s.githubService.GetConnection(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if conn == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"connected": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"connected":     true,
+		"github_user":   conn.GitHubUser,
+		"github_avatar": conn.GitHubAvatar,
+	})
+}
+
+func (s *Server) handleDeleteGitHubConnection(w http.ResponseWriter, r *http.Request) {
+	orgID := GetOrgID(r.Context())
+	if err := s.githubService.DeleteConnection(r.Context(), orgID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGitHubAuthURL(w http.ResponseWriter, r *http.Request) {
+	orgID := GetOrgID(r.Context())
+	if !s.githubService.Configured() {
+		writeError(w, http.StatusServiceUnavailable, "GitHub OAuth not configured. Set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET in .env")
+		return
+	}
+	authURL, state, err := s.githubService.GetAuthURL(orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": authURL, "state": state})
+}
+
+func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	orgID := GetOrgID(r.Context())
+	var req struct {
+		Code  string `json:"code"`
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Code == "" {
+		writeError(w, http.StatusBadRequest, "code is required")
+		return
+	}
+	conn, err := s.githubService.ExchangeCode(r.Context(), orgID, req.Code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"connected":     true,
+		"github_user":   conn.GitHubUser,
+		"github_avatar": conn.GitHubAvatar,
+	})
+}
+
 func (s *Server) handleGetClaudeConfig(w http.ResponseWriter, r *http.Request) {
 	orgID := r.Header.Get("X-Org-ID")
 	userID := r.Header.Get("X-User-ID")
@@ -2442,6 +2532,7 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 
 	linearConn, _ := s.linearService.GetConnection(ctx, orgID)
 	claudeCfg, _ := s.claudeService.GetConfig(ctx, orgID, "")
+	ghConn, _ := s.githubService.GetConnection(ctx, orgID)
 
 	// Check billing
 	hasBilling := false
@@ -2450,12 +2541,10 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 	if err == nil && tier == "paid" {
 		hasBilling = true
 	}
-	// Ignore errors - org might not have billing configured yet
 
 	// Check repos
 	var repoCount int
 	_ = s.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repo_connections WHERE org_id = $1`, orgID).Scan(&repoCount)
-	// Ignore errors - might be 0 repos
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"linear": map[string]interface{}{
@@ -2465,6 +2554,11 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 		"claude": map[string]interface{}{
 			"configured":   claudeCfg != nil,
 			"model":        func() string { if claudeCfg != nil { return claudeCfg.Model }; return "" }(),
+		},
+		"github": map[string]interface{}{
+			"connected":     ghConn != nil,
+			"github_user":   func() string { if ghConn != nil { return ghConn.GitHubUser }; return "" }(),
+			"github_avatar": func() string { if ghConn != nil { return ghConn.GitHubAvatar }; return "" }(),
 		},
 		"billing": map[string]interface{}{
 			"active": hasBilling,

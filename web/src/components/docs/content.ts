@@ -40,19 +40,164 @@ Every developer has experienced this: you spin up a new dev environment, and you
 
 ## Architecture
 
+\`\`\`mermaid
+graph LR
+  subgraph Clients
+    CLI["CLI (gc)"]
+    Dash["Dashboard"]
+    MCP["MCP Server"]
+  end
+
+  subgraph API["API Server"]
+    EnvSvc["Environment Service"]
+    CtxSvc["Context Service"]
+    TaskSvc["Task Service"]
+  end
+
+  subgraph Data["Data & Messaging"]
+    PG["PostgreSQL"]
+    NATS["NATS JetStream"]
+    Vault["Vault"]
+  end
+
+  subgraph Cloud["Cloud Environments"]
+    Agent["gradient-agent"]
+    Docker["Dev Container"]
+  end
+
+  CLI --> API
+  Dash --> API
+  MCP --> API
+  API --> PG
+  API --> NATS
+  API --> Vault
+  API --> Cloud
+  Agent --> NATS
+  Agent --> Docker
 \`\`\`
-┌─────────┐     ┌──────────┐     ┌──────────────────────┐
-│  CLI    │────▶│  API     │────▶│  Cloud Providers     │
-│  (gc)   │     │  (Go)    │     │  (Hetzner/AWS/GCP)   │
-└─────────┘     └────┬─────┘     └──────────────────────┘
-                     │
-          ┌──────────┼──────────┐
-          ▼          ▼          ▼
-     ┌─────────┐ ┌──────┐ ┌────────┐
-     │Postgres │ │ NATS │ │ Vault  │
-     │(context)│ │(mesh)│ │(secrets)│
-     └─────────┘ └──────┘ └────────┘
+
+## Example: How a team uses Gradient
+
+Meet **NovaSight**, a 6-person startup building a computer vision API. Their ML engineers train models, their backend devs build the serving layer, and they all waste hours re-setting up environments. Here's how they use Gradient.
+
+### Day 1 — Getting started
+
+The lead engineer sets up the org and saves the team's baseline context to \`main\`.
+
+\`\`\`bash
+gc org create "NovaSight"
+gc org invite alex@novasight.io
+gc org invite priya@novasight.io
+
+gc repo connect --repo novasight/vision-api
+
+gc context save --branch main --os ubuntu-24.04
+gc context save --branch main --packages python3=3.12,torch=2.1.0,fastapi=0.109.0
+gc context save --branch main --patterns "cuda_fix=use CUDA 12.1 not 12.0"
 \`\`\`
+
+Now every environment on \`main\` starts pre-loaded with this knowledge. No one has to rediscover that CUDA 12.0 doesn't work.
+
+\`\`\`mermaid
+graph LR
+  Lead["Lead Engineer"] -->|saves context| Main["main branch"]
+  Main -->|packages| P["python3, torch, fastapi"]
+  Main -->|patterns| K["cuda_fix: use CUDA 12.1"]
+  Main -->|os| OS["ubuntu-24.04"]
+\`\`\`
+
+### Day 2 — Alex starts a feature branch
+
+Alex creates a feature branch. Because the GitHub repo is connected, **auto-fork** kicks in — the new branch inherits everything from \`main\` automatically.
+
+\`\`\`bash
+git checkout -b feature/yolo-v9
+git push origin feature/yolo-v9
+\`\`\`
+
+\`\`\`mermaid
+graph LR
+  Main["main"] -->|auto-fork| Feature["feature/yolo-v9"]
+  Feature -->|inherits| P["python3, torch, fastapi"]
+  Feature -->|inherits| K["cuda_fix: use CUDA 12.1"]
+\`\`\`
+
+Alex spins up a GPU environment linked to this branch. It boots with all of \`main\`'s packages and patterns already available — no setup required.
+
+\`\`\`bash
+gc env create --name yolo-training --size gpu --region nbg1 --branch feature/yolo-v9
+gc env ssh <env-id>
+\`\`\`
+
+### Day 2, later — Alex discovers something
+
+While training, Alex hits an OOM error and figures out the fix. The agent running inside the environment publishes this to the **Live Context Mesh** automatically.
+
+\`\`\`bash
+gc context publish --branch feature/yolo-v9 --type pattern_learned \\
+  --key "oom_fix" --value "reduce batch_size to 16 for YOLOv9 on 16GB VRAM"
+\`\`\`
+
+### Day 3 — Priya joins the same branch
+
+Priya needs to benchmark Alex's model. She creates her own environment on the same branch.
+
+\`\`\`bash
+gc env create --name yolo-bench --size gpu --region nbg1 --branch feature/yolo-v9
+\`\`\`
+
+Her environment instantly has Alex's OOM fix and every package Alex installed. She doesn't ask "what batch size should I use" — the context store already knows.
+
+\`\`\`mermaid
+graph TB
+  Branch["feature/yolo-v9 context"]
+  Alex["Alex's env"] -->|publishes| Branch
+  Branch -->|streams to| Priya["Priya's env"]
+  Branch -->|packages| Pkg["torch, ultralytics, ..."]
+  Branch -->|patterns| Pat["oom_fix: batch_size=16"]
+\`\`\`
+
+### Day 4 — Delegate work to an AI agent
+
+The team has a backlog of test coverage to write. Instead of doing it manually, they create an **Agent Task** and let Claude Code handle it on a Gradient environment.
+
+\`\`\`bash
+gc task create \\
+  --title "Add unit tests for YOLO inference endpoint" \\
+  --branch feature/yolo-v9 \\
+  --auto-start
+\`\`\`
+
+Gradient spins up an environment, loads the branch context, clones the repo, and hands it to Claude Code. When it finishes, the task posts a pull request.
+
+\`\`\`mermaid
+graph LR
+  Task["Agent Task"] -->|provisions| Env["Cloud Env"]
+  Env -->|loads| Ctx["Branch Context"]
+  Env -->|clones| Repo["vision-api repo"]
+  Env -->|runs| Claude["Claude Code"]
+  Claude -->|opens| PR["Pull Request"]
+\`\`\`
+
+### Day 5 — Environment destroyed, nothing lost
+
+Alex destroys his GPU environment to save costs. A **snapshot** is taken automatically before teardown. The context store keeps every package, pattern, and failure he recorded.
+
+\`\`\`bash
+gc env destroy <env-id>
+\`\`\`
+
+Next week, when Alex creates a new environment on the same branch, it boots right back where he left off.
+
+\`\`\`mermaid
+graph LR
+  Destroy["env destroyed"] -->|auto-snapshot| Snap["Snapshot saved"]
+  Destroy -->|context preserved| Store["Context Store"]
+  Store -->|restores to| NewEnv["New environment"]
+  Snap -->|restores to| NewEnv
+\`\`\`
+
+---
 
 ## Interfaces
 
@@ -80,12 +225,12 @@ Get a Gradient environment running in under 5 minutes.
 ## Prerequisites
 
 - macOS, Linux, or WSL
-- A Gradient account — [sign up](https://gradient.dev)
+- A Gradient account — [sign up](https://usegradient.dev)
 
 ## 1. Install the CLI
 
 \`\`\`bash
-curl -fsSL https://get.gradient.dev | sh
+curl -fsSL https://raw.githubusercontent.com/use-gradient/gradient-repo/main/scripts/install.sh | sh
 \`\`\`
 
 ## 2. Authenticate
@@ -236,11 +381,11 @@ Organizations in Gradient map to Clerk organizations. They provide:
 ## Install
 
 \`\`\`bash
-# macOS / Linux
-curl -fsSL https://get.gradient.dev | sh
+# macOS / Linux — one-line install from GitHub
+curl -fsSL https://raw.githubusercontent.com/use-gradient/gradient-repo/main/scripts/install.sh | sh
 
-# Or with Homebrew
-brew install gradient
+# Or download a release directly from GitHub
+# https://github.com/use-gradient/gradient-repo/releases
 \`\`\`
 
 ## Verify installation
@@ -271,7 +416,7 @@ The CLI stores configuration in \`~/.gradient/config.json\`:
 \`\`\`json
 {
   "token": "your-jwt-token",
-  "api_url": "https://api.gradient.dev",
+  "api_url": "https://api.usegradient.dev",
   "org_id": "org_xxxxx"
 }
 \`\`\``,
@@ -301,7 +446,7 @@ gc auth status
 # Status:       ✓ logged in
 # Name:         Jane Developer
 # Email:        jane@company.com
-# API URL:      https://api.gradient.dev
+# API URL:      https://api.usegradient.dev
 # Active Org:   org_xxxxx
 \`\`\`
 
@@ -873,7 +1018,7 @@ The Gradient API requires authentication via JWT tokens.
 ## Base URL
 
 \`\`\`
-https://api.gradient.dev/api/v1
+https://api.usegradient.dev/api/v1
 \`\`\`
 
 ## Headers
@@ -1025,7 +1170,7 @@ GET    /api/v1/billing/payment-method          # Get current payment method
 
 \`\`\`json
 {
-  "return_url": "https://gradient.dev/dashboard/billing",
+  "return_url": "https://usegradient.dev/dashboard/billing",
   "flow": "payment_method_update"
 }
 \`\`\`
@@ -1480,7 +1625,7 @@ Add to your Cursor MCP settings:
       "command": "/path/to/gradient-mcp",
       "args": [],
       "env": {
-        "GRADIENT_API_URL": "https://api.gradient.dev",
+        "GRADIENT_API_URL": "https://api.usegradient.dev",
         "GRADIENT_TOKEN": "your-token"
       }
     }
@@ -1979,7 +2124,7 @@ Step-by-step guide to install the \`gc\` CLI:
 
 \`\`\`bash
 # Install
-curl -fsSL https://get.gradient.dev | sh
+curl -fsSL https://raw.githubusercontent.com/use-gradient/gradient-repo/main/scripts/install.sh | sh
 
 # Authenticate
 gc auth login
@@ -1995,7 +2140,7 @@ Shows how to use the REST API with JWT tokens:
 \`\`\`bash
 gc auth login
 TOKEN=$(cat ~/.gradient/config.json | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-curl -H "Authorization: Bearer $TOKEN" https://api.gradient.dev/api/v1/environments
+curl -H "Authorization: Bearer $TOKEN" https://api.usegradient.dev/api/v1/environments
 \`\`\`
 
 ### MCP server

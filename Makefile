@@ -25,7 +25,7 @@ build-api:
 	go build -o bin/gradient-api cmd/api/main.go
 
 build-cli:
-	go build -o bin/gc cmd/cli/main.go
+	go build -ldflags="-s -w -X main.Version=dev-local" -o bin/gc ./cmd/cli
 
 build-mcp:
 	go build -o bin/gradient-mcp cmd/mcp/main.go

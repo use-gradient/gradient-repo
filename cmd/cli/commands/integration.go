@@ -178,7 +178,7 @@ func newIntegrationLinearCmd() *cobra.Command {
 				fmt.Printf("  Trigger:   Issues in '%s' state with label matching filter\n", str(conn["trigger_state"]))
 			} else {
 				fmt.Println("○ Linear not connected")
-				fmt.Println("  Connect via the dashboard: https://gradient.dev/dashboard/integrations")
+				fmt.Println("  Connect via the dashboard: https://usegradient.dev/dashboard/integrations")
 			}
 			return nil
 		},

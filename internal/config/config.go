@@ -62,6 +62,11 @@ type Config struct {
 	GitHubAppID            string
 	GitHubAppWebhookSecret string
 
+	// GitHub OAuth (repo connect)
+	GitHubOAuthClientID     string
+	GitHubOAuthClientSecret string
+	GitHubOAuthRedirectURI  string
+
 	// Linear Integration (agent tasks)
 	LinearClientID     string
 	LinearClientSecret string
@@ -75,7 +80,7 @@ type Config struct {
 	JWTSecret string // HMAC secret for signing long-lived CLI tokens
 
 	// API
-	APIURL string // External API URL (e.g. "https://api.gradient.dev") — passed to agents
+	APIURL string // External API URL (e.g. "https://api.usegradient.dev") — passed to agents
 
 	// Agent
 	AgentDownloadURL string // URL for gradient-agent binary download
@@ -134,8 +139,11 @@ func Load() *Config {
 		GCPProjectID:           getEnv("GCP_PROJECT_ID", ""),
 		GCPCredentialsPath:     getEnv("GCP_CREDENTIALS_PATH", ""),
 		GCPRegion:              getEnv("GCP_REGION", "us-west1"),
-		GitHubAppID:            getEnv("GITHUB_APP_ID", ""),
-		GitHubAppWebhookSecret: getEnv("GITHUB_APP_WEBHOOK_SECRET", ""),
+		GitHubAppID:             getEnv("GITHUB_APP_ID", ""),
+		GitHubAppWebhookSecret:  getEnv("GITHUB_APP_WEBHOOK_SECRET", ""),
+		GitHubOAuthClientID:     getEnv("GITHUB_OAUTH_CLIENT_ID", ""),
+		GitHubOAuthClientSecret: getEnv("GITHUB_OAUTH_CLIENT_SECRET", ""),
+		GitHubOAuthRedirectURI:  getEnv("GITHUB_OAUTH_REDIRECT_URI", ""),
 		LinearClientID:         getEnv("LINEAR_CLIENT_ID", ""),
 		LinearClientSecret:     getEnv("LINEAR_CLIENT_SECRET", ""),
 		LinearRedirectURI:      getEnv("LINEAR_REDIRECT_URI", ""),

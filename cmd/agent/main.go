@@ -27,7 +27,7 @@ import (
 // and participates in the Live Context Mesh for real-time context sharing.
 //
 // Environment variables:
-//   GRADIENT_API_URL           — Gradient API URL (e.g. https://api.gradient.dev)
+//   GRADIENT_API_URL           — Gradient API URL (e.g. https://api.usegradient.dev)
 //   GRADIENT_ENV_ID            — Environment ID
 //   GRADIENT_ORG_ID            — Organization ID
 //   GRADIENT_AUTH_TOKEN        — Auth token for API calls

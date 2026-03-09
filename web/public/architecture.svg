@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" fill="none">
+  <style>
+    .box { fill: #0d0e10; stroke: #1a1c20; stroke-width: 1.5; rx: 4; }
+    .box-accent { fill: #0d0e10; stroke: #5a9a94; stroke-width: 1.5; rx: 4; }
+    .label { fill: #b4bcd0; font-family: 'Space Grotesk', system-ui, sans-serif; font-size: 13px; font-weight: 600; }
+    .sublabel { fill: #5c6578; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
+    .arrow { stroke: #5a9a94; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+    .arrow-dim { stroke: #2a2d35; stroke-width: 1; fill: none; marker-end: url(#arrowhead-dim); }
+    .group-label { fill: #5c6578; font-family: 'Space Grotesk', system-ui, sans-serif; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 1.2px; }
+    .group-bg { fill: #08090a; stroke: #1a1c20; stroke-width: 1; stroke-dasharray: 4 3; rx: 6; }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#5a9a94" stroke-width="1.2"/>
+    </marker>
+    <marker id="arrowhead-dim" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#2a2d35" stroke-width="1"/>
+    </marker>
+  </defs>
+
+  <rect width="720" height="400" fill="#08090a" rx="6"/>
+
+  <!-- Clients group -->
+  <rect class="group-bg" x="16" y="20" width="200" height="170"/>
+  <text class="group-label" x="32" y="38">Clients</text>
+
+  <rect class="box" x="32" y="50" width="168" height="36"/>
+  <text class="label" x="116" y="72" text-anchor="middle">CLI (gc)</text>
+
+  <rect class="box" x="32" y="96" width="168" height="36"/>
+  <text class="label" x="116" y="118" text-anchor="middle">Dashboard</text>
+  <text class="sublabel" x="116" y="128" text-anchor="middle">React · :6969</text>
+
+  <rect class="box" x="32" y="142" width="168" height="36"/>
+  <text class="label" x="116" y="164" text-anchor="middle">MCP Server</text>
+  <text class="sublabel" x="116" y="174" text-anchor="middle">AI agents · stdio</text>
+
+  <!-- API Server -->
+  <rect class="box-accent" x="276" y="70" width="168" height="56"/>
+  <text class="label" x="360" y="96" text-anchor="middle">API Server</text>
+  <text class="sublabel" x="360" y="112" text-anchor="middle">Go · :6767</text>
+
+  <!-- Arrows: clients ’ API -->
+  <line class="arrow" x1="200" y1="68" x2="274" y2="90"/>
+  <line class="arrow" x1="200" y1="114" x2="274" y2="98"/>
+  <line class="arrow-dim" x1="200" y1="160" x2="274" y2="105"/>
+
+  <!-- Data layer group -->
+  <rect class="group-bg" x="236" y="170" width="248" height="210"/>
+  <text class="group-label" x="252" y="188">Data &amp; Messaging</text>
+
+  <rect class="box" x="252" y="200" width="100" height="52"/>
+  <text class="label" x="302" y="224" text-anchor="middle">PostgreSQL</text>
+  <text class="sublabel" x="302" y="240" text-anchor="middle">context · state</text>
+
+  <rect class="box" x="368" y="200" width="100" height="52"/>
+  <text class="label" x="418" y="224" text-anchor="middle">NATS</text>
+  <text class="sublabel" x="418" y="240" text-anchor="middle">JetStream mesh</text>
+
+  <rect class="box" x="310" y="270" width="100" height="52"/>
+  <text class="label" x="360" y="294" text-anchor="middle">Vault</text>
+  <text class="sublabel" x="360" y="310" text-anchor="middle">secrets</text>
+
+  <rect class="box" x="310" y="340" width="100" height="32"/>
+  <text class="label" x="360" y="361" text-anchor="middle">Stripe</text>
+
+  <!-- Arrows: API ’ data -->
+  <line class="arrow" x1="340" y1="126" x2="310" y2="198"/>
+  <line class="arrow" x1="380" y1="126" x2="410" y2="198"/>
+  <line class="arrow-dim" x1="360" y1="126" x2="360" y2="268"/>
+  <line class="arrow-dim" x1="360" y1="126" x2="360" y2="338"/>
+
+  <!-- Cloud group -->
+  <rect class="group-bg" x="504" y="20" width="200" height="360"/>
+  <text class="group-label" x="520" y="38">Cloud Environments</text>
+
+  <rect class="box" x="520" y="54" width="168" height="52"/>
+  <text class="label" x="604" y="78" text-anchor="middle">Hetzner Cloud</text>
+  <text class="sublabel" x="604" y="94" text-anchor="middle">primary · fsn1 nbg1 hel1</text>
+
+  <rect class="box" x="520" y="118" width="168" height="36"/>
+  <text class="label" x="604" y="140" text-anchor="middle">AWS EC2</text>
+  <text class="sublabel" x="604" y="150" text-anchor="middle">legacy</text>
+
+  <!-- gradient-agent box -->
+  <rect class="box-accent" x="520" y="180" width="168" height="52"/>
+  <text class="label" x="604" y="204" text-anchor="middle">gradient-agent</text>
+  <text class="sublabel" x="604" y="220" text-anchor="middle">on each server</text>
+
+  <!-- Docker container -->
+  <rect class="box" x="520" y="248" width="168" height="52"/>
+  <text class="label" x="604" y="272" text-anchor="middle">Docker Container</text>
+  <text class="sublabel" x="604" y="288" text-anchor="middle">dev environment</text>
+
+  <!-- Registry -->
+  <rect class="box" x="520" y="316" width="168" height="48"/>
+  <text class="label" x="604" y="340" text-anchor="middle">Container Registry</text>
+  <text class="sublabel" x="604" y="354" text-anchor="middle">snapshots</text>
+
+  <!-- Arrows: API ’ Cloud -->
+  <line class="arrow" x1="444" y1="90" x2="518" y2="76"/>
+  <line class="arrow-dim" x1="444" y1="100" x2="518" y2="130"/>
+
+  <!-- Arrow: agent ” NATS -->
+  <line class="arrow" x1="518" y1="210" x2="470" y2="224"/>
+</svg>

@@ -119,15 +119,28 @@ CREATE TABLE IF NOT EXISTS github_installations (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- GitHub OAuth connections (one per org — stores user access token)
+CREATE TABLE IF NOT EXISTS github_connections (
+    id VARCHAR(255) PRIMARY KEY,
+    org_id VARCHAR(255) NOT NULL UNIQUE,
+    access_token TEXT NOT NULL,
+    github_user VARCHAR(255),
+    github_avatar VARCHAR(500),
+    scopes TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Repo connections (links GitHub repo → Gradient org for auto-fork)
 CREATE TABLE IF NOT EXISTS repo_connections (
     id VARCHAR(255) PRIMARY KEY,
     org_id VARCHAR(255) NOT NULL,
-    installation_id BIGINT NOT NULL,
+    installation_id BIGINT NOT NULL DEFAULT 0,
     repo_full_name VARCHAR(500) NOT NULL,
     default_branch VARCHAR(255) DEFAULT 'main',
     auto_fork_enabled BOOLEAN DEFAULT true,
     auto_snapshot_on_push BOOLEAN DEFAULT true,
+    webhook_id BIGINT,
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(org_id, repo_full_name)
 );
@@ -260,6 +273,18 @@ END $$;
 -- Billing tier: "free" (20hr/mo limit, small only) or "paid" (any size, payment method required)
 DO $$ BEGIN
     ALTER TABLE org_settings ADD COLUMN IF NOT EXISTS billing_tier VARCHAR(20) DEFAULT 'free';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- webhook_id for repo connections (GitHub OAuth flow creates webhooks per-repo)
+DO $$ BEGIN
+    ALTER TABLE repo_connections ADD COLUMN IF NOT EXISTS webhook_id BIGINT;
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- Make installation_id optional (OAuth flow doesn't use GitHub App installations)
+DO $$ BEGIN
+    ALTER TABLE repo_connections ALTER COLUMN installation_id SET DEFAULT 0;
 EXCEPTION WHEN others THEN NULL;
 END $$;
 

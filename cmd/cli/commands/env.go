@@ -186,6 +186,9 @@ func NewEnvDestroyCmd() *cobra.Command {
 }
 
 func NewEnvSSHCmd() *cobra.Command {
+	var container bool
+	var infoOnly bool
+
 	cmd := &cobra.Command{
 		Use:   "ssh [env-id]",
 		Short: "SSH into a running environment",
@@ -204,26 +207,56 @@ func NewEnvSSHCmd() *cobra.Command {
 
 			host := fmt.Sprint(sshInfo["host"])
 			user := fmt.Sprint(sshInfo["user"])
-			sshCommand := fmt.Sprint(sshInfo["command"])
 
-			keyFlag := ""
-			if keyPath := gradientSSHKeyPath(); keyPath != "" {
-				keyFlag = fmt.Sprintf(" -i %s", keyPath)
+			keyPath := gradientSSHKeyPath()
+
+			if infoOnly {
+				keyFlag := ""
+				if keyPath != "" {
+					keyFlag = fmt.Sprintf(" -i %s", keyPath)
+				}
+				fmt.Printf("SSH connection info for environment %s:\n\n", args[0])
+				fmt.Printf("  Host:     %s\n", host)
+				fmt.Printf("  User:     %s\n", user)
+				fmt.Printf("  Port:     22\n\n")
+				fmt.Printf("  Connect to host:\n")
+				fmt.Printf("    ssh%s %s@%s\n\n", keyFlag, user, host)
+				fmt.Printf("  Connect directly into container:\n")
+				fmt.Printf("    ssh%s %s@%s -t 'docker exec -it gradient-env /bin/bash'\n", keyFlag, user, host)
+				return nil
 			}
 
-			fmt.Printf("SSH connection info for environment %s:\n\n", args[0])
-			fmt.Printf("  Host:     %s\n", host)
-			fmt.Printf("  User:     %s\n", user)
-			fmt.Printf("  Port:     22\n\n")
-			fmt.Printf("  Connect to host:\n")
-			fmt.Printf("    ssh%s %s@%s\n\n", keyFlag, user, host)
-			_ = sshCommand // API-provided command (without key)
-			fmt.Printf("  Connect directly into container:\n")
-			fmt.Printf("    ssh%s %s@%s -t 'docker exec -it gradient-env /bin/bash'\n", keyFlag, user, host)
+			sshArgs := []string{
+				"-o", "StrictHostKeyChecking=no",
+				"-o", "UserKnownHostsFile=/dev/null",
+				"-o", "LogLevel=ERROR",
+			}
+			if keyPath != "" {
+				sshArgs = append(sshArgs, "-i", keyPath)
+			}
 
-			return nil
+			if container {
+				sshArgs = append(sshArgs, "-t", fmt.Sprintf("%s@%s", user, host),
+					"docker exec -it gradient-env /bin/bash")
+			} else {
+				sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, host))
+			}
+
+			sshBin, err := exec.LookPath("ssh")
+			if err != nil {
+				return fmt.Errorf("ssh not found in PATH: %w", err)
+			}
+
+			proc := exec.Command(sshBin, sshArgs...)
+			proc.Stdin = os.Stdin
+			proc.Stdout = os.Stdout
+			proc.Stderr = os.Stderr
+			return proc.Run()
 		},
 	}
+
+	cmd.Flags().BoolVarP(&container, "container", "c", false, "SSH directly into the Docker container")
+	cmd.Flags().BoolVar(&infoOnly, "info", false, "Print connection info instead of connecting")
 	return cmd
 }
 
@@ -386,13 +419,21 @@ Examples:
 
 			host := fmt.Sprint(sshInfo["host"])
 
-			// Build docker exec command
-			dockerCmd := fmt.Sprintf("docker exec -it gradient-env %s", strings.Join(cmdArgs, " "))
+			// Build docker exec command — use -t only when we have a terminal
+			dockerFlag := "-i"
+			if fileInfo, _ := os.Stdin.Stat(); fileInfo.Mode()&os.ModeCharDevice != 0 {
+				dockerFlag = "-it"
+			}
+			dockerCmd := fmt.Sprintf("docker exec %s gradient-env %s", dockerFlag, strings.Join(cmdArgs, " "))
 
 			sshArgs := []string{
 				"-o", "StrictHostKeyChecking=no",
+				"-o", "UserKnownHostsFile=/dev/null",
+				"-o", "LogLevel=ERROR",
 				"-o", "ConnectTimeout=10",
-				"-t", // Force TTY allocation
+			}
+			if fileInfo, _ := os.Stdin.Stat(); fileInfo.Mode()&os.ModeCharDevice != 0 {
+				sshArgs = append(sshArgs, "-t")
 			}
 			if keyPath := gradientSSHKeyPath(); keyPath != "" {
 				sshArgs = append(sshArgs, "-i", keyPath)

@@ -88,7 +88,7 @@ type ProviderConfig struct {
 	EnvID         string // Environment ID for API calls & mesh scoping
 	OrgID         string // Organization ID
 	Branch        string // Git branch (for Live Context Mesh scoping)
-	APIURL        string // Gradient API URL (e.g. https://api.gradient.dev)
+	APIURL        string // Gradient API URL (e.g. https://api.usegradient.dev)
 	AuthToken     string // Auth token for API calls
 	NATSUrl       string // NATS server URL for Live Context Mesh
 	NATSAuthToken string // NATS auth token

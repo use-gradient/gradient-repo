@@ -1,22 +1,24 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth, useOrganization } from '@clerk/clerk-react'
 
+const IS_DEV = import.meta.env.DEV
+
 /** Hook to get auth token + org ID for API calls */
 export function useAPIAuth() {
   const { getToken, isSignedIn } = useAuth()
   const { organization } = useOrganization()
-  const orgId = organization?.id || ''
+  const orgId = organization?.id || (IS_DEV ? (import.meta.env.VITE_DEV_ORG_ID || 'dev-org') : '')
 
   const getAuthToken = useCallback(async () => {
     try {
       const token = await getToken()
-      return token
+      return token || (IS_DEV ? 'dev-token' : null)
     } catch {
-      return null
+      return IS_DEV ? 'dev-token' : null
     }
   }, [getToken])
 
-  return { getAuthToken, orgId, isSignedIn }
+  return { getAuthToken, orgId, isSignedIn: isSignedIn || IS_DEV }
 }
 
 /** Generic data fetching hook */

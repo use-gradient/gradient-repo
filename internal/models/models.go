@@ -330,15 +330,28 @@ type ScaleEvent struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// GitHubConnection stores a GitHub OAuth token for an org
+type GitHubConnection struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	AccessToken  string    `json:"-"`
+	GitHubUser   string    `json:"github_user"`
+	GitHubAvatar string    `json:"github_avatar"`
+	Scopes       string    `json:"scopes"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 // RepoConnection links a GitHub repo to a Gradient org for auto-fork
 type RepoConnection struct {
 	ID                    string    `json:"id"`
 	OrgID                 string    `json:"org_id"`
 	InstallationID        int64     `json:"installation_id"`
-	RepoFullName          string    `json:"repo_full_name"` // "owner/repo"
+	RepoFullName          string    `json:"repo_full_name"`
 	DefaultBranch         string    `json:"default_branch"`
 	AutoForkEnabled       bool      `json:"auto_fork_enabled"`
 	AutoSnapshotOnPush    bool      `json:"auto_snapshot_on_push"`
+	WebhookID             int64     `json:"webhook_id,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 }
 

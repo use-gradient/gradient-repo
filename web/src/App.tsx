@@ -14,7 +14,10 @@ import TasksTab from '@/components/dashboard/TasksTab'
 import IntegrationsTab from '@/components/dashboard/IntegrationsTab'
 import OnboardingWizard from '@/components/dashboard/OnboardingWizard'
 
+const IS_DEV = import.meta.env.DEV
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  if (IS_DEV) return <>{children}</>
   return (
     <>
       <SignedIn>{children}</SignedIn>
@@ -37,17 +40,19 @@ function LoadingScreen() {
 export default function App() {
   const { isLoaded } = useAuth()
 
-  if (!isLoaded) return <LoadingScreen />
+  if (!isLoaded && !IS_DEV) return <LoadingScreen />
 
   return (
     <ToastProvider>
       <Routes>
         {/* Public pages — redirect to dashboard if signed in */}
         <Route path="/" element={
-          <>
-            <SignedIn><Navigate to="/dashboard" replace /></SignedIn>
-            <SignedOut><Landing /></SignedOut>
-          </>
+          IS_DEV ? <Navigate to="/dashboard" replace /> : (
+            <>
+              <SignedIn><Navigate to="/dashboard" replace /></SignedIn>
+              <SignedOut><Landing /></SignedOut>
+            </>
+          )
         } />
         <Route path="/login/*" element={<Login />} />
         <Route path="/signup/*" element={<Signup />} />

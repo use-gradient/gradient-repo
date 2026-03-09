@@ -1,0 +1,37 @@
+app = "gradient-nats"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile.nats"
+
+[mounts]
+  source = "nats_data"
+  destination = "/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 4222
+
+  [[services.ports]]
+    port = 4222
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8222
+
+  [[services.ports]]
+    port = 8222
+
+[processes]
+  app = ""
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = 256
+
+[checks]
+  [checks.nats]
+    port = 8222
+    type = "tcp"
+    interval = "15s"
+    timeout = "2s"

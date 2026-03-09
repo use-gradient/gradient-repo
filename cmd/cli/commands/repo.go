@@ -16,11 +16,49 @@ func NewRepoCmd() *cobra.Command {
 		Long:  "Connect GitHub repositories to enable auto-fork: new branches automatically inherit environment state (context + snapshots).",
 	}
 
+	cmd.AddCommand(newRepoAuthCmd())
 	cmd.AddCommand(newRepoConnectCmd())
 	cmd.AddCommand(newRepoListCmd())
 	cmd.AddCommand(newRepoDisconnectCmd())
 
 	return cmd
+}
+
+func newRepoAuthCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "auth",
+		Short: "Authenticate with GitHub for repo connections",
+		Long:  "Opens your browser to authorize Gradient with your GitHub account. After authorization, you can connect repositories.",
+		Example: `  gc repo auth
+  gc repo connect --repo owner/repo`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := NewAPIClient()
+			if err != nil {
+				return err
+			}
+
+			var result struct {
+				URL   string `json:"url"`
+				State string `json:"state"`
+			}
+			err = client.DoJSON("GET", "/api/v1/integrations/github/auth-url", nil, &result)
+			if err != nil {
+				return fmt.Errorf("failed to get GitHub auth URL: %w", err)
+			}
+
+			fmt.Println("Opening browser to authorize GitHub...")
+			fmt.Printf("URL: %s\n\n", result.URL)
+
+			if err := openBrowser(result.URL); err != nil {
+				fmt.Println("Could not open browser automatically.")
+				fmt.Printf("Open this URL manually: %s\n", result.URL)
+			}
+
+			fmt.Println("After authorizing, run:")
+			fmt.Println("  gc repo connect --repo owner/repo")
+			return nil
+		},
+	}
 }
 
 func newRepoConnectCmd() *cobra.Command {

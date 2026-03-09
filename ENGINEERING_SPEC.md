@@ -86,33 +86,33 @@ Every AI coding agent today (Claude Code, Cursor, Windsurf, etc.) still dies on 
 ### High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Control Plane (Go)                            │
+┌────────────────────────────────────────────────────────────────┐
+│                    Control Plane (Go)                          │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Orchestration Engine                                     │  │
-│  │  - Multi-cloud provider abstraction                       │  │
-│  │  - Auto-scaling decisions                                 │  │
+│  │  Orchestration Engine                                    │  │
+│  │  - Multi-cloud provider abstraction                      │  │
+│  │  - Auto-scaling decisions                                │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  Secret Manager (Thin Orchestrator)                      │  │
 │  │  - Orchestrates Vault, AWS Secrets Manager, GCP, etc.    │  │
-│  │  - Cross-environment sync                                 │  │
-│  │  - Context-aware injection                                │  │
+│  │  - Cross-environment sync                                │  │
+│  │  - Context-aware injection                               │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Context Store (Distributed)                               │  │
-│  │  - Branch/PR context persistence                          │  │
-│  │  - Agent state sharing                                    │  │
-│  │  - Cross-environment context sync                         │  │
+│  │  Context Store (Distributed)                             │  │
+│  │  - Branch/PR context persistence                         │  │
+│  │  - Agent state sharing                                   │  │
+│  │  - Cross-environment context sync                        │  │
 │  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────┘
                             │
         ┌───────────────────┼───────────────────┐
         │                   │                   │
         ▼                   ▼                   ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  CLI (Go)    │    │  REST API     │    │  MCP Server  │
-│  - gc cmd    │    │  (HTTP/gRPC)  │    │  (MCP)       │
+│  CLI (Go)    │    │  REST API    │    │  MCP Server  │
+│  - gc cmd    │    │  (HTTP/gRPC) │    │  (MCP)       │
 └──────────────┘    └──────────────┘    └──────────────┘
         │                   │                   │
         └───────────────────┼───────────────────┘
@@ -129,8 +129,8 @@ Every AI coding agent today (Claude Code, Cursor, Windsurf, etc.) still dies on 
         │                   │                   │
         ▼                   ▼                   ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   AWS Envs   │    │   GCP Envs    │    │  Azure Envs  │
-│  (EKS, EC2)  │    │  (GKE, GCE)   │    │  (AKS, VMs)  │
+│   AWS Envs   │    │   GCP Envs   │    │  Azure Envs  │
+│  (EKS, EC2)  │    │  (GKE, GCE)  │    │  (AKS, VMs)  │
 └──────────────┘    └──────────────┘    └──────────────┘
 ```
 

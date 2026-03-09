@@ -196,7 +196,7 @@ gradient/
 | Authorization URL | `https://linear.app/oauth/authorize` |
 | Token URL | `https://api.linear.app/oauth/token` |
 | Scopes | `read`, `write`, `issues:create`, `comments:create` |
-| Redirect URI | `https://app.gradient.dev/integrations/linear/callback` |
+| Redirect URI | `https://app.usegradient.dev/integrations/linear/callback` |
 | Grant Type | `authorization_code` |
 
 **What we need from Linear:**
@@ -888,7 +888,7 @@ Org: "Acme Corp"
 # Linear OAuth (for the OAuth flow)
 LINEAR_CLIENT_ID=<from Linear OAuth app>
 LINEAR_CLIENT_SECRET=<from Linear OAuth app>
-LINEAR_REDIRECT_URI=https://app.gradient.dev/integrations/linear/callback
+LINEAR_REDIRECT_URI=https://app.usegradient.dev/integrations/linear/callback
 
 # Encryption key for storing secrets (generate with: openssl rand -hex 32)
 GRADIENT_ENCRYPTION_KEY=<64-char hex string>

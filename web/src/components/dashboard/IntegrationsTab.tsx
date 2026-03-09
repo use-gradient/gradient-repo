@@ -91,7 +91,9 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
 }
 
 /* ─── Connect Repo Modal ─── */
-function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClose: () => void; onConnected: () => void }) {
+function ConnectRepoModal({ open, onClose, onConnected, githubConnected }: {
+  open: boolean; onClose: () => void; onConnected: () => void; githubConnected: boolean
+}) {
   const [repoName, setRepoName] = useState('')
   const [manualInput, setManualInput] = useState(false)
   const { toast } = useToast()
@@ -101,22 +103,19 @@ function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClo
   
   const { data: availableData, loading: loadingAvailable, refetch } = useFetch(
     useCallback((token: string, orgId: string) => {
-      if (!open) return Promise.resolve({ repos: [] })
+      if (!open || !githubConnected) return Promise.resolve({ repos: [] })
       return api.repos.available(token, orgId)
-    }, [open])
+    }, [open, githubConnected])
   )
   const availableRepos = availableData?.repos || []
 
-  // Refetch when modal opens
   useEffect(() => {
-    if (open) {
-      refetch()
-    }
-  }, [open, refetch])
+    if (open && githubConnected) refetch()
+  }, [open, githubConnected, refetch])
 
   const handleConnect = async () => {
     if (!repoName) return
-    const result = await mutate({ repo_full_name: repoName })
+    const result = await mutate({ repo: repoName })
     if (result) {
       toast('success', `Repository "${repoName}" connected`)
       setRepoName('')
@@ -126,12 +125,6 @@ function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClo
     }
   }
 
-  const handleInstallGitHubApp = () => {
-    window.open('https://github.com/apps/gradient', '_blank')
-    // Refetch available repos after a delay (user might install and come back)
-    setTimeout(() => refetch(), 2000)
-  }
-
   return (
     <Modal open={open} onClose={onClose} title="Connect Repository" description="Link a GitHub repo for auto-fork context" size="sm" footer={
       <Button onClick={handleConnect} loading={loading} disabled={!repoName}>
@@ -139,7 +132,13 @@ function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClo
       </Button>
     }>
       <div className="space-y-4">
-        {loadingAvailable ? (
+        {!githubConnected ? (
+          <div className="p-4 rounded-md bg-muted/50 border border-border text-center">
+            <p className="text-sm text-muted-foreground">
+              Connect your GitHub account first from the Connections tab.
+            </p>
+          </div>
+        ) : loadingAvailable ? (
           <Skeleton className="h-10 w-full" />
         ) : availableRepos.length > 0 ? (
           <>
@@ -148,64 +147,36 @@ function ConnectRepoModal({ open, onClose, onConnected }: { open: boolean; onClo
               placeholder="Select a repository..."
               value={repoName}
               onChange={e => setRepoName(e.target.value)}
-              options={availableRepos.map(repo => ({ value: repo, label: repo }))}
+              options={availableRepos.map((repo: string) => ({ value: repo, label: repo }))}
             />
             {!manualInput && (
-              <button
-                type="button"
-                onClick={() => setManualInput(true)}
-                className="text-xs text-muted-foreground hover:text-foreground underline"
-              >
+              <button type="button" onClick={() => setManualInput(true)}
+                className="text-xs text-muted-foreground hover:text-foreground underline">
                 Or enter repository manually
               </button>
             )}
           </>
         ) : (
           <div className="space-y-3">
-            <div className="p-4 rounded-md bg-muted/50 border border-border text-center">
-              <p className="text-sm text-muted-foreground mb-3">
-                No repositories available. Install the Gradient GitHub App to connect repositories.
-              </p>
-              <Button onClick={handleInstallGitHubApp} variant="outline" size="sm">
-                <Github className="w-3.5 h-3.5 mr-2" />
-                Install GitHub App
-                <ExternalLink className="w-3 h-3 ml-2" />
-              </Button>
-            </div>
-            {manualInput && (
-              <Input
-                label="Repository (manual entry)"
-                placeholder="owner/repo-name"
-                value={repoName}
-                onChange={e => setRepoName(e.target.value)}
-                mono
-              />
-            )}
+            <p className="text-sm text-muted-foreground text-center">
+              No additional repositories found. Enter a repo name manually.
+            </p>
             {!manualInput && (
-              <button
-                type="button"
-                onClick={() => setManualInput(true)}
-                className="text-xs text-muted-foreground hover:text-foreground underline"
-              >
-                Or enter repository manually
+              <button type="button" onClick={() => setManualInput(true)}
+                className="text-xs text-muted-foreground hover:text-foreground underline">
+                Enter repository manually
               </button>
             )}
           </div>
         )}
         
-        {manualInput && availableRepos.length > 0 && (
-          <Input
-            label="Repository (manual entry)"
-            placeholder="owner/repo-name"
-            value={repoName}
-            onChange={e => setRepoName(e.target.value)}
-            mono
-          />
+        {manualInput && (
+          <Input label="Repository" placeholder="owner/repo-name" value={repoName}
+            onChange={e => setRepoName(e.target.value)} mono />
         )}
         
         <p className="text-xs text-muted-foreground">
-          The Gradient GitHub App must be installed on this repository. When a new branch is created,
-          Gradient automatically copies the parent branch&#39;s context + snapshot pointers.
+          When a new branch is created, Gradient automatically copies the parent branch&#39;s context + snapshot pointers.
         </p>
         {error && <p className="text-xs text-destructive">{error}</p>}
         <div className="pt-2 border-t border-border">
@@ -259,6 +230,47 @@ export default function IntegrationsTab() {
     (token: string, orgId: string, id: string) => api.repos.disconnect(token, orgId, id)
   )
 
+  const { mutate: getGitHubURL, loading: githubLoading } = useMutation(
+    (token: string, orgId: string, _: any) => api.integrations.github.authUrl(token, orgId)
+  )
+
+  const { mutate: exchangeGitHubCode, loading: githubExchanging } = useMutation(
+    (token: string, orgId: string, body: any) => api.integrations.github.callback(token, orgId, body)
+  )
+
+  const { mutate: disconnectGitHub, loading: disconnectingGitHub } = useMutation(
+    (token: string, orgId: string, _: any) => api.integrations.github.disconnect(token, orgId)
+  )
+
+  // Handle GitHub OAuth callback — read ?code= from URL
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const code = params.get('code')
+    const state = params.get('state')
+    if (code) {
+      window.history.replaceState({}, '', window.location.pathname)
+      exchangeGitHubCode({ code, state: state || '' }).then(result => {
+        if (result?.connected) {
+          toast('success', `GitHub connected as ${result.github_user}`)
+          refetch()
+        }
+      })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleConnectGitHub = async () => {
+    const result = await getGitHubURL(null)
+    if (result?.url) {
+      window.location.href = result.url
+    }
+  }
+
+  const handleDisconnectGitHub = async () => {
+    await disconnectGitHub(null)
+    toast('success', 'GitHub disconnected')
+    refetch()
+  }
+
   const handleConnectLinear = async () => {
     const result = await getLinearURL(null)
     if (result?.url) {
@@ -296,6 +308,7 @@ export default function IntegrationsTab() {
   }
 
   const isReady = status?.ready
+  const githubConnected = !!status?.github?.connected
 
   if (loading) {
     return <div className="space-y-4">{[1,2,3,4].map(i => <Skeleton key={i} className="h-24 w-full" />)}</div>
@@ -420,38 +433,41 @@ export default function IntegrationsTab() {
             </div>
           </Card>
 
-          {/* GitHub Repos summary */}
+          {/* GitHub OAuth */}
           <Card className="p-5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className={cn(
                   'w-10 h-10 rounded-lg flex items-center justify-center',
-                  status?.repos?.connected ? 'bg-primary/10' : 'bg-muted',
+                  githubConnected ? 'bg-primary/10' : 'bg-muted',
                 )}>
                   <Github className="w-5 h-5" />
                 </div>
                 <div>
                   <p className="text-sm font-medium text-foreground">GitHub</p>
                   <p className="text-xs text-muted-foreground">
-                    {status?.repos?.connected
-                      ? `${status.repos.count} repo${status.repos.count !== 1 ? 's' : ''} connected`
-                      : 'Connect repos for auto-fork context'}
+                    {githubConnected
+                      ? <>Connected as <span className="text-foreground font-medium">{status.github.github_user}</span>{status.repos?.count > 0 ? ` · ${status.repos.count} repo${status.repos.count !== 1 ? 's' : ''}` : ''}</>
+                      : 'Authenticate with GitHub to connect repositories'}
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {status?.repos?.connected ? (
+                {githubConnected ? (
                   <>
                     <Badge className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
-                      <CheckCircle2 className="w-3 h-3 mr-1" /> {status.repos.count} connected
+                      <CheckCircle2 className="w-3 h-3 mr-1" /> Connected
                     </Badge>
                     <Button variant="outline" size="sm" onClick={() => setActiveSection('repos')}>
-                      Manage <ArrowRight className="w-3 h-3" />
+                      Repos <ArrowRight className="w-3 h-3" />
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={handleDisconnectGitHub} loading={disconnectingGitHub}>
+                      <Trash2 className="w-3.5 h-3.5" />
                     </Button>
                   </>
                 ) : (
-                  <Button size="sm" onClick={() => setShowConnect(true)}>
-                    <Plus className="w-3.5 h-3.5" /> Connect Repo
+                  <Button size="sm" onClick={handleConnectGitHub} loading={githubLoading || githubExchanging}>
+                    <Github className="w-3.5 h-3.5" /> Connect GitHub
                   </Button>
                 )}
               </div>
@@ -565,8 +581,8 @@ export default function IntegrationsTab() {
             <h3 className="text-xs font-medium text-foreground mb-3 flex items-center gap-1.5"><GitBranch className="w-3.5 h-3.5 text-primary" /> How Auto-Fork Works</h3>
             <div className="space-y-3 text-xs text-muted-foreground">
               {[
-                'Install the Gradient GitHub App on your repository',
-                <>Connect it here with <code className="text-foreground font-mono bg-secondary px-1 rounded">gc repo connect</code></>,
+                <>Authenticate with GitHub via <code className="text-foreground font-mono bg-secondary px-1 rounded">gc repo auth</code> or the Connections tab</>,
+                <>Connect a repo with <code className="text-foreground font-mono bg-secondary px-1 rounded">gc repo connect --repo owner/repo</code></>,
                 <>Create a branch: <code className="text-foreground font-mono bg-secondary px-1 rounded">git checkout -b feature/new</code></>,
                 "Gradient copies main's context + snapshots to the new branch automatically",
               ].map((text, i) => (
@@ -653,6 +669,7 @@ export default function IntegrationsTab() {
         open={showConnect}
         onClose={() => setShowConnect(false)}
         onConnected={handleRepoConnected}
+        githubConnected={githubConnected}
       />
 
       <ConfirmDialog

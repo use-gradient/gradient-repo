@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useLocation, useNavigate, Link } from 'react-router-dom'
 import { cn, copyToClipboard } from '@/lib/utils'
 import { Button, CopyButton } from '@/components/ui'
+import { Mermaid } from '@/components/ui/Mermaid'
 import {
   docsSections, findDocsPage, getDefaultPage, getAdjacentPages, generateFullDocsMarkdown,
 } from '@/components/docs/content'
@@ -10,47 +11,153 @@ import {
   Menu, X, Copy, Check, Download, Bot,
 } from 'lucide-react'
 
-/* ─── Markdown renderer (lightweight) ─── */
-function renderMarkdown(md: string): string {
-  let html = md
+/* ─── Markdown renderer (block-based, returns segments for React rendering) ─── */
+type Segment = { type: 'html'; content: string } | { type: 'mermaid'; content: string }
+
+function parseMarkdown(md: string): Segment[] {
+  const segments: Segment[] = []
+  const htmlBlocks: string[] = []
+
+  function flushHtml() {
+    if (htmlBlocks.length > 0) {
+      segments.push({ type: 'html', content: htmlBlocks.join('\n') })
+      htmlBlocks.length = 0
+    }
+  }
+
+  const lines = md.split('\n')
+  let i = 0
+
+  while (i < lines.length) {
+    const line = lines[i]
+
+    // Code blocks — detect language
+    if (line.startsWith('```')) {
+      const lang = line.slice(3).trim()
+      const codeLines: string[] = []
+      i++
+      while (i < lines.length && !lines[i].startsWith('```')) {
+        codeLines.push(lines[i])
+        i++
+      }
+      i++ // skip closing ```
+
+      if (lang === 'mermaid') {
+        flushHtml()
+        segments.push({ type: 'mermaid', content: codeLines.join('\n').trim() })
+      } else {
+        const escaped = codeLines.join('\n').replace(/</g, '&lt;').replace(/>/g, '&gt;').trim()
+        htmlBlocks.push(`<div class="relative group my-4"><pre class="bg-background border border-border rounded-sm p-4 overflow-x-auto"><code class="text-xs font-mono text-foreground leading-relaxed">${escaped}</code></pre><button class="doc-copy-btn absolute top-2 right-2 text-muted-foreground/50 hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity p-1" data-code="${encodeURIComponent(escaped)}" aria-label="Copy code"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button></div>`)
+      }
+      continue
+    }
+
+    // Image tags: ![alt](src)
+    const imgMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/)
+    if (imgMatch) {
+      htmlBlocks.push(`<img src="${imgMatch[2]}" alt="${imgMatch[1]}" class="my-6 rounded-sm border border-border max-w-full" />`)
+      i++; continue
+    }
+
+    // Tables — collect consecutive | lines
+    if (line.startsWith('|')) {
+      const tableRows: string[][] = []
+      let hasHeader = false
+      while (i < lines.length && lines[i].startsWith('|')) {
+        const row = lines[i].split('|').filter(c => c.trim())
+        if (row.every(c => /^[\s\-:]+$/.test(c))) { hasHeader = true; i++; continue }
+        tableRows.push(row.map(c => c.trim()))
+        i++
+      }
+      if (tableRows.length > 0) {
+        let tableHtml = '<div class="overflow-x-auto my-4"><table class="w-full text-sm">'
+        tableRows.forEach((row, ri) => {
+          const tag = (hasHeader && ri === 0) ? 'th' : 'td'
+          const cls = tag === 'th'
+            ? 'px-3 py-2 text-xs font-medium text-foreground border-b border-border text-left'
+            : 'px-3 py-2 text-xs text-muted-foreground border-b border-border'
+          tableHtml += '<tr>' + row.map(c => `<${tag} class="${cls}">${renderInline(c)}</${tag}>`).join('') + '</tr>'
+        })
+        tableHtml += '</table></div>'
+        htmlBlocks.push(tableHtml)
+      }
+      continue
+    }
+
     // Headers
-    .replace(/^### (.+)$/gm, '<h3 class="text-sm font-semibold text-foreground mt-8 mb-3">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 class="text-base font-semibold text-foreground mt-10 mb-4" id="$1">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 class="text-xl font-bold text-foreground mb-6">$1</h1>')
-    // Block quotes
-    .replace(/^> (.+)$/gm, '<blockquote class="border-l-2 border-primary pl-4 text-sm text-muted-foreground italic my-4">$1</blockquote>')
+    const h1 = line.match(/^# (.+)$/)
+    if (h1) { htmlBlocks.push(`<h1 class="text-xl font-bold text-foreground mb-6">${renderInline(h1[1])}</h1>`); i++; continue }
+    const h2 = line.match(/^## (.+)$/)
+    if (h2) { htmlBlocks.push(`<h2 class="text-base font-semibold text-foreground mt-10 mb-4" id="${h2[1]}">${renderInline(h2[1])}</h2>`); i++; continue }
+    const h3 = line.match(/^### (.+)$/)
+    if (h3) { htmlBlocks.push(`<h3 class="text-sm font-semibold text-foreground mt-8 mb-3">${renderInline(h3[1])}</h3>`); i++; continue }
+
+    // Blockquotes
+    if (line.startsWith('> ')) {
+      htmlBlocks.push(`<blockquote class="border-l-2 border-primary pl-4 text-sm text-muted-foreground italic my-4">${renderInline(line.slice(2))}</blockquote>`)
+      i++; continue
+    }
+
     // Horizontal rules
-    .replace(/^---$/gm, '<hr class="border-border my-8" />')
-    // Code blocks
-    .replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
-      const escaped = code.replace(/</g, '&lt;').replace(/>/g, '&gt;').trim()
-      return `<div class="relative group my-4"><pre class="bg-background border border-border rounded-sm p-4 overflow-x-auto"><code class="text-xs font-mono text-foreground leading-relaxed">${escaped}</code></pre><button class="doc-copy-btn absolute top-2 right-2 text-muted-foreground/50 hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity p-1" data-code="${encodeURIComponent(escaped)}" aria-label="Copy code"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button></div>`
-    })
-    // Inline code
+    if (/^---$/.test(line)) { htmlBlocks.push('<hr class="border-border my-8" />'); i++; continue }
+
+    // Unordered lists
+    if (line.match(/^- /)) {
+      let listHtml = '<ul class="my-3 space-y-1">'
+      while (i < lines.length && lines[i].match(/^- /)) {
+        listHtml += `<li class="text-sm text-muted-foreground ml-4 list-disc">${renderInline(lines[i].slice(2))}</li>`
+        i++
+      }
+      listHtml += '</ul>'
+      htmlBlocks.push(listHtml)
+      continue
+    }
+
+    // Ordered lists
+    if (line.match(/^\d+\. /)) {
+      let listHtml = '<ol class="my-3 space-y-1">'
+      while (i < lines.length && lines[i].match(/^\d+\. /)) {
+        const content = lines[i].replace(/^\d+\. /, '')
+        listHtml += `<li class="text-sm text-muted-foreground ml-4 list-decimal">${renderInline(content)}</li>`
+        i++
+      }
+      listHtml += '</ol>'
+      htmlBlocks.push(listHtml)
+      continue
+    }
+
+    // Empty lines
+    if (line.trim() === '') { i++; continue }
+
+    // Paragraphs
+    htmlBlocks.push(`<p class="text-sm text-muted-foreground leading-relaxed mb-3">${renderInline(line)}</p>`)
+    i++
+  }
+
+  flushHtml()
+  return segments
+}
+
+function renderInline(text: string): string {
+  return text
     .replace(/`([^`]+)`/g, '<code class="bg-secondary px-1.5 py-0.5 rounded text-xs font-mono text-primary">$1</code>')
-    // Tables
-    .replace(/^\|(.+)\|$/gm, (match) => {
-      const cells = match.split('|').filter(c => c.trim())
-      if (cells.every(c => /^[\s-:]+$/.test(c))) return '' // separator row
-      const tds = cells.map(c => `<td class="px-3 py-2 text-xs text-muted-foreground border-b border-border">${c.trim()}</td>`).join('')
-      return `<tr class="border-b border-border">${tds}</tr>`
-    })
-    // Bold
     .replace(/\*\*(.+?)\*\*/g, '<strong class="text-foreground font-medium">$1</strong>')
-    // Italic
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Links
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-primary hover:underline">$1</a>')
-    // Lists
-    .replace(/^- (.+)$/gm, '<li class="text-sm text-muted-foreground ml-4 list-disc">$1</li>')
-    .replace(/^(\d+)\. (.+)$/gm, '<li class="text-sm text-muted-foreground ml-4 list-decimal">$2</li>')
-    // Paragraphs (wrap remaining loose text)
-    .replace(/^(?!<[hbluodtp]|<li|<hr|<div|<pre|<blockquote|<table|<tr)(.+)$/gm, '<p class="text-sm text-muted-foreground leading-relaxed mb-3">$1</p>')
+}
 
-  // Wrap table rows
-  html = html.replace(/(<tr[\s\S]*?<\/tr>\s*)+/g, '<div class="overflow-x-auto my-4"><table class="w-full text-sm">$&</table></div>')
-
-  return html
+function RenderedContent({ segments }: { segments: Segment[] }) {
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.type === 'mermaid' ? (
+          <Mermaid key={i} chart={seg.content} className="my-6 overflow-x-auto" />
+        ) : (
+          <div key={i} dangerouslySetInnerHTML={{ __html: seg.content }} />
+        )
+      )}
+    </>
+  )
 }
 
 /* ─── TOC extractor ─── */
@@ -204,7 +311,7 @@ export default function DocsPage() {
   const currentPage = findDocsPage(sectionId, pageId)
   const { prev, next } = getAdjacentPages(sectionId, pageId)
   const toc = currentPage ? extractTOC(currentPage.content) : []
-  const renderedContent = currentPage ? renderMarkdown(currentPage.content) : ''
+  const contentSegments = useMemo(() => currentPage ? parseMarkdown(currentPage.content) : [], [currentPage])
 
   // Copy code buttons
   useEffect(() => {
@@ -303,9 +410,9 @@ export default function DocsPage() {
               </div>
 
               {/* Rendered content */}
-              <article
-                dangerouslySetInnerHTML={{ __html: renderedContent }}
-              />
+              <article>
+                <RenderedContent segments={contentSegments} />
+              </article>
 
               {/* Prev/Next */}
               <nav className="flex items-center justify-between mt-12 pt-6 border-t border-border" aria-label="Page navigation">
