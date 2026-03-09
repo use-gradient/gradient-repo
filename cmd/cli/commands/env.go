@@ -57,6 +57,37 @@ func NewEnvCreateCmd() *cobra.Command {
 		Use:   "create",
 		Short: "Create a new environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Validate --size
+			validSizes := map[string]bool{"small": true, "medium": true, "large": true, "gpu": true}
+			if !validSizes[size] {
+				return fmt.Errorf("invalid size %q — must be one of: small, medium, large, gpu", size)
+			}
+
+			// Validate --region (Hetzner locations)
+			validRegions := map[string]bool{
+				"fsn1": true, "nbg1": true, "hel1": true, // Hetzner EU
+				"ash": true, "hil": true, // Hetzner US
+				// AWS regions
+				"us-east-1": true, "us-east-2": true, "us-west-1": true, "us-west-2": true,
+				"eu-west-1": true, "eu-central-1": true, "ap-southeast-1": true,
+				// GCP regions
+				"us-central1": true, "us-west1": true, "europe-west1": true,
+			}
+			if !validRegions[region] {
+				hetznerRegions := "fsn1, nbg1, hel1, ash, hil"
+				awsRegions := "us-east-1, us-east-2, us-west-1, us-west-2, eu-west-1, eu-central-1, ap-southeast-1"
+				gcpRegions := "us-central1, us-west1, europe-west1"
+				return fmt.Errorf("invalid region %q\n  Hetzner: %s\n  AWS:     %s\n  GCP:     %s", region, hetznerRegions, awsRegions, gcpRegions)
+			}
+
+			// Validate --provider if specified
+			if provider != "" {
+				validProviders := map[string]bool{"hetzner": true, "aws": true, "gcp": true}
+				if !validProviders[provider] {
+					return fmt.Errorf("invalid provider %q — must be one of: hetzner, aws, gcp", provider)
+				}
+			}
+
 			client, err := NewAPIClient()
 			if err != nil {
 				return err
