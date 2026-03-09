@@ -248,7 +248,7 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 			claims, err := m.parseToken(tokenString)
 			if err == nil {
 				userID = claims.Subject
-				orgID = claims.OrgID
+				orgID = claims.GetOrgIDFromClaims()
 
 				// Dev mode: allow X-Org-ID header to override JWT org_id.
 				// This makes `gc org switch` work during local development.
@@ -298,9 +298,28 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 	})
 }
 
+// clerkV2Org represents the nested "o" object in Clerk v2 session JWTs
+type clerkV2Org struct {
+	ID   string `json:"id"`
+	Role string `json:"rol"`
+	Slug string `json:"slg"`
+}
+
 type GradientClaims struct {
-	OrgID string `json:"org_id"`
+	OrgID   string      `json:"org_id"`  // Gradient HMAC tokens + Clerk v1
+	ClerkOrg *clerkV2Org `json:"o"`      // Clerk v2 session JWTs
 	jwt.RegisteredClaims
+}
+
+// GetOrgIDFromClaims returns the org ID from whichever claim format is present
+func (c *GradientClaims) GetOrgIDFromClaims() string {
+	if c.OrgID != "" {
+		return c.OrgID
+	}
+	if c.ClerkOrg != nil && c.ClerkOrg.ID != "" {
+		return c.ClerkOrg.ID
+	}
+	return ""
 }
 
 func (m *AuthMiddleware) parseToken(tokenString string) (*GradientClaims, error) {
