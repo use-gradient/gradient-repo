@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
-import { useOrganization } from '@clerk/clerk-react'
+import { useOrganization, CreateOrganization } from '@clerk/clerk-react'
 import { Sidebar } from './Sidebar'
 import { HelpCircle, Building2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/ui'
+
+const IS_DEV = import.meta.env.DEV
 
 const tabTitles: Record<string, string> = {
   environments:  'Environments',
@@ -59,7 +61,32 @@ export function DashboardShell() {
         </header>
 
         <div className="px-6 md:px-8 py-6">
-          <Outlet />
+          {!IS_DEV && !organization ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-6">
+              <div className="text-center space-y-2">
+                <Building2 className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+                <h2 className="text-lg font-semibold text-foreground">Create an Organization</h2>
+                <p className="text-sm text-muted-foreground max-w-md">
+                  Create an organization to get started. Organizations hold your environments, context, integrations, and billing.
+                </p>
+              </div>
+              <CreateOrganization
+                afterCreateOrganizationUrl="/dashboard/environments"
+                appearance={{
+                  elements: {
+                    rootBox: { width: '100%', maxWidth: '420px' },
+                    card: { backgroundColor: 'hsl(220 14% 5%)', borderColor: 'hsl(220 10% 12%)', boxShadow: 'none' },
+                    headerTitle: { color: 'hsl(220 20% 76%)' },
+                    headerSubtitle: { color: 'hsl(220 12% 38%)' },
+                    formFieldInput: { backgroundColor: 'hsl(220 14% 4%)', borderColor: 'hsl(220 10% 12%)', color: 'hsl(220 20% 76%)' },
+                    formButtonPrimary: { backgroundColor: 'hsl(172 26% 48%)' },
+                  },
+                }}
+              />
+            </div>
+          ) : (
+            <Outlet />
+          )}
         </div>
       </main>
     </div>
