@@ -233,6 +233,13 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	r.Use(s.rateLimiter.Middleware)
 	r.Use(RequestLogger)
 
+	// Catch-all OPTIONS handler — must be before all other routes so
+	// CORS preflight requests are handled even when the path+method
+	// combination doesn't match a registered route.
+	r.PathPrefix("/").Methods("OPTIONS").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
 	// Webhook endpoint — NO AUTH (GitHub calls this directly, verified by HMAC signature)
 	r.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook).Methods("POST")
 

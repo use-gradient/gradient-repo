@@ -1,13 +1,23 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useAuth, useOrganization } from '@clerk/clerk-react'
+import { useAuth, useOrganization, useOrganizationList } from '@clerk/clerk-react'
 
 const IS_DEV = import.meta.env.DEV
 
 /** Hook to get auth token + org ID for API calls */
 export function useAPIAuth() {
-  const { getToken, isSignedIn } = useAuth()
+  const { getToken, isSignedIn, orgId: sessionOrgId } = useAuth()
   const { organization } = useOrganization()
+  const { setActive } = useOrganizationList()
   const orgId = organization?.id || (IS_DEV ? (import.meta.env.VITE_DEV_ORG_ID || 'dev-org') : '')
+
+  // Ensure the session is scoped to the active org. Clerk JWTs only
+  // include org_id when setActive({ organization }) has been called.
+  useEffect(() => {
+    if (IS_DEV || !organization?.id || !setActive) return
+    if (sessionOrgId !== organization.id) {
+      setActive({ organization: organization.id })
+    }
+  }, [organization?.id, sessionOrgId, setActive])
 
   const getAuthToken = useCallback(async () => {
     try {
