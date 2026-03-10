@@ -242,13 +242,29 @@ export default function IntegrationsTab() {
     (token: string, orgId: string, _: any) => api.integrations.github.disconnect(token, orgId)
   )
 
-  // Handle GitHub OAuth callback — read ?code= from URL
+  const { mutate: exchangeLinearCode, loading: linearExchanging } = useMutation(
+    (token: string, orgId: string, body: any) => api.integrations.linear.callback(token, orgId, body)
+  )
+
+  // Handle OAuth callback — read ?code= from URL and route to correct provider
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
     const state = params.get('state')
-    if (code) {
-      window.history.replaceState({}, '', window.location.pathname)
+    if (!code) return
+
+    window.history.replaceState({}, '', window.location.pathname)
+    const provider = localStorage.getItem('oauth_provider')
+    localStorage.removeItem('oauth_provider')
+
+    if (provider === 'linear') {
+      exchangeLinearCode({ code, state: state || '' }).then(result => {
+        if (result) {
+          toast('success', 'Linear connected!')
+          refetch()
+        }
+      })
+    } else {
       exchangeGitHubCode({ code, state: state || '' }).then(result => {
         if (result?.connected) {
           toast('success', `GitHub connected as ${result.github_user}`)
@@ -261,6 +277,7 @@ export default function IntegrationsTab() {
   const handleConnectGitHub = async () => {
     const result = await getGitHubURL(null)
     if (result?.url) {
+      localStorage.setItem('oauth_provider', 'github')
       window.location.href = result.url
     }
   }
@@ -274,8 +291,8 @@ export default function IntegrationsTab() {
   const handleConnectLinear = async () => {
     const result = await getLinearURL(null)
     if (result?.url) {
-      window.open(result.url, '_blank')
-      toast('info', 'Complete the OAuth flow in the new tab, then refresh this page.')
+      localStorage.setItem('oauth_provider', 'linear')
+      window.location.href = result.url
     }
   }
 

@@ -260,8 +260,9 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Webhook endpoint — NO AUTH (GitHub calls this directly, verified by HMAC signature)
+	// Webhook endpoints — NO AUTH (verified by HMAC signature)
 	r.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook).Methods("POST")
+	r.HandleFunc("/api/v1/webhooks/linear", s.handleLinearWebhook).Methods("POST")
 
 	// Health check — no auth
 	r.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET")
@@ -565,6 +566,33 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// --- Linear Webhook ---
+
+func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	source := services.NewLinearTaskSource(s.linearService)
+
+	task, err := source.ParseEvent(body)
+	if err != nil {
+		fmt.Printf("[webhook/linear] failed to parse event: %v\n", err)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+		return
+	}
+
+	if task == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+		return
+	}
+
+	fmt.Printf("[webhook/linear] received task: %s (%s)\n", task.Title, task.ExternalID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

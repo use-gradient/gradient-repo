@@ -68,9 +68,10 @@ type Config struct {
 	GitHubOAuthRedirectURI  string
 
 	// Linear Integration (agent tasks)
-	LinearClientID     string
-	LinearClientSecret string
-	LinearRedirectURI  string
+	LinearClientID       string
+	LinearClientSecret   string
+	LinearRedirectURI    string
+	LinearWebhookSecret  string
 
 	// Secrets Backends
 	VaultAddr  string
@@ -147,6 +148,7 @@ func Load() *Config {
 		LinearClientID:         getEnv("LINEAR_CLIENT_ID", ""),
 		LinearClientSecret:     getEnv("LINEAR_CLIENT_SECRET", ""),
 		LinearRedirectURI:      getEnv("LINEAR_REDIRECT_URI", ""),
+		LinearWebhookSecret:    getEnv("LINEAR_WEBHOOK_SECRET", ""),
 		VaultAddr:              getEnv("VAULT_ADDR", ""),
 		VaultToken:             getEnv("VAULT_TOKEN", ""),
 		JWTSecret:              getEnv("JWT_SECRET", ""),
