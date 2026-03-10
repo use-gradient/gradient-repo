@@ -52,6 +52,12 @@ type Server struct {
 	linearService *services.LinearService
 	claudeService *services.ClaudeService
 	taskService   *services.TaskService
+	taskExecutor  *services.TaskExecutorService
+
+	// Agent-Native VCS
+	sessionService *services.SessionService
+	mergeService   *services.MergeService
+	taskClassifier *services.TaskClassifier
 
 	// Rate limiting
 	rateLimiter *RateLimiter
@@ -89,7 +95,7 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		}
 	}
 
-	// AWS provider (legacy) — only initialized if configured
+	// AWS provider (primary for compliance) — initialized if configured
 	var awsProvider env.Provider
 	if cfg.AWSAccessKeyID != "" && cfg.AWSAmiID != "" {
 		p, err := env.NewAWSProvider(
@@ -103,7 +109,7 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		)
 		if err == nil {
 			awsProvider = p
-			fmt.Println("[init] AWS provider initialized (legacy)")
+			fmt.Println("[init] AWS provider initialized")
 		} else {
 			fmt.Printf("[init] AWS provider not available: %v\n", err)
 		}
@@ -199,6 +205,16 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	taskService := services.NewTaskService(database, envService, claudeService, linearService, contextService)
 	fmt.Println("[init] ✓ Agent task service initialized")
 
+	taskExecutor := services.NewTaskExecutorService(
+		database, envService, claudeService, taskService, githubService, linearService, meshPublisher, snapshotStore,
+	)
+
+	// Agent-Native VCS services
+	sessionService := services.NewSessionService(database)
+	mergeService := services.NewMergeService(database, sessionService, envService, meshPublisher)
+	taskClassifier := services.NewTaskClassifier(claudeService)
+	fmt.Println("[init] ✓ Agent-Native VCS services initialized")
+
 	// Rate limiter
 	rateLimiter := NewRateLimiter(DefaultRateLimitConfig())
 
@@ -222,6 +238,10 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		linearService:    linearService,
 		claudeService:    claudeService,
 		taskService:      taskService,
+		taskExecutor:     taskExecutor,
+		sessionService:   sessionService,
+		mergeService:     mergeService,
+		taskClassifier:   taskClassifier,
 		rateLimiter:      rateLimiter,
 	}
 }
@@ -361,6 +381,21 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	authenticated.HandleFunc("/tasks/{id}/cancel", s.handleCancelTask).Methods("POST")
 	authenticated.HandleFunc("/tasks/{id}/retry", s.handleRetryTask).Methods("POST")
 	authenticated.HandleFunc("/tasks/{id}/logs", s.handleGetTaskLogs).Methods("GET")
+	authenticated.HandleFunc("/tasks/{id}/classify", s.handleClassifyTask).Methods("POST")
+
+	// ── Agent Sessions & VCS ────────────────────────────────────────
+	authenticated.HandleFunc("/sessions", s.handleListSessions).Methods("GET")
+	authenticated.HandleFunc("/sessions", s.handleCreateSession).Methods("POST")
+	authenticated.HandleFunc("/sessions/{id}", s.handleGetSession).Methods("GET")
+	authenticated.HandleFunc("/sessions/{id}/status", s.handleUpdateSessionStatus).Methods("PATCH")
+	authenticated.HandleFunc("/sessions/{id}/bundles", s.handleListBundles).Methods("GET")
+	authenticated.HandleFunc("/sessions/{id}/bundles", s.handleCreateBundle).Methods("POST")
+	authenticated.HandleFunc("/contracts", s.handleListContracts).Methods("GET")
+	authenticated.HandleFunc("/contracts", s.handleCreateContract).Methods("POST")
+	authenticated.HandleFunc("/contracts/{id}", s.handleGetContract).Methods("GET")
+	authenticated.HandleFunc("/context-objects", s.handleListContextObjects).Methods("GET")
+	authenticated.HandleFunc("/context-objects", s.handleUpsertContextObject).Methods("POST")
+	authenticated.HandleFunc("/merge-status/{taskId}", s.handleGetMergeStatus).Methods("GET")
 
 	// ── Integrations ─────────────────────────────────────────────────
 	authenticated.HandleFunc("/integrations/linear", s.handleGetLinearConnection).Methods("GET")
@@ -2147,7 +2182,11 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// Auto-start if requested
 	autoStart := r.URL.Query().Get("auto_start")
 	if autoStart == "true" || autoStart == "1" {
-		go s.taskService.StartTaskExecution(context.Background(), orgID, task.ID)
+		go func() {
+			bgCtx := context.Background()
+			s.taskService.StartTaskExecution(bgCtx, orgID, task.ID)
+			s.taskExecutor.ExecuteTask(bgCtx, orgID, task.ID)
+		}()
 	}
 
 	writeJSON(w, http.StatusCreated, task)
@@ -2203,6 +2242,10 @@ func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Kick off actual execution in the background
+	go s.taskExecutor.ExecuteTask(context.Background(), orgID, taskID)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
 }
 
@@ -2247,6 +2290,7 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.taskExecutor.CancelTask(taskID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 

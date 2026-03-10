@@ -145,6 +145,16 @@ func DefaultPoolTargets(provider string, region string, poolCfg WarmPoolConfig) 
 		}
 	}
 
+	// AWS targets (compliance workloads — separate from Hetzner cost pool)
+	targets["aws:small:us-east-2"] = PoolTarget{
+		Provider: "aws", Size: "small", Region: "us-east-2",
+		MinReady: 2, MaxReady: 4,
+	}
+	targets["aws:medium:us-east-2"] = PoolTarget{
+		Provider: "aws", Size: "medium", Region: "us-east-2",
+		MinReady: 1, MaxReady: 2,
+	}
+
 	// Large/GPU: on-demand only (no warm pool — too expensive pre-revenue)
 	return targets
 }

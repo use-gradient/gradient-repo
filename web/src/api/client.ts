@@ -147,6 +147,21 @@ export const api = {
     stats:    (token: string, orgId: string) => request<any>('GET', '/tasks/stats', undefined, token, orgId),
   },
 
+  // ── Sessions ──
+  sessions: {
+    list:    (token: string, orgId: string, params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+      return request<any[]>('GET', `/sessions${qs}`, undefined, token, orgId)
+    },
+    get:     (token: string, orgId: string, id: string) => request<any>('GET', `/sessions/${id}`, undefined, token, orgId),
+    bundles: (token: string, orgId: string, id: string) => request<any[]>('GET', `/sessions/${id}/bundles`, undefined, token, orgId),
+  },
+
+  // ── Merge Status ──
+  mergeStatus: {
+    get: (token: string, orgId: string, taskId: string) => request<any>('GET', `/merge-status/${taskId}`, undefined, token, orgId),
+  },
+
   // ── Integrations ──
   integrations: {
     status:          (token: string, orgId: string) => request<any>('GET', '/integrations/status', undefined, token, orgId),

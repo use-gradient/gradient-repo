@@ -42,6 +42,16 @@ const (
 	EventCommandRan       EventType = "command_ran"
 	EventFileChanged      EventType = "file_changed"
 	EventCustom           EventType = "custom"
+
+	// Agent orchestration events
+	EventBugDiscovered    EventType = "bug_discovered"
+	EventContractUpdated  EventType = "contract_updated"
+	EventPRCreated        EventType = "pr_created"
+	EventPRUpdated        EventType = "pr_updated"
+	EventConflictDetected EventType = "conflict_detected"
+	EventContextStale     EventType = "context_stale"
+	EventMergeSuccess     EventType = "merge_success"
+	EventAgentReactivated EventType = "agent_reactivated"
 )
 
 // validEventTypes is the canonical set of valid event types.
@@ -57,6 +67,16 @@ var validEventTypes = map[EventType]bool{
 	EventCommandRan:       true,
 	EventFileChanged:      true,
 	EventCustom:           true,
+
+	// Agent orchestration events
+	EventBugDiscovered:    true,
+	EventContractUpdated:  true,
+	EventPRCreated:        true,
+	EventPRUpdated:        true,
+	EventConflictDetected: true,
+	EventContextStale:     true,
+	EventMergeSuccess:     true,
+	EventAgentReactivated: true,
 }
 
 // IsValidEventType returns true if the event type is recognized.
@@ -170,6 +190,52 @@ type FileChangeData struct {
 type CustomData struct {
 	Key   string          `json:"key"`
 	Value json.RawMessage `json:"value"`
+}
+
+// BugDiscoveredData is the payload for bug_discovered events.
+type BugDiscoveredData struct {
+	AffectedFiles []string `json:"affected_files"`
+	Description   string   `json:"description"`
+	FixApplied    string   `json:"fix_applied,omitempty"`
+	Severity      string   `json:"severity,omitempty"` // "low", "medium", "high", "critical"
+	SessionID     string   `json:"session_id"`
+	PRURL         string   `json:"pr_url,omitempty"`
+}
+
+// ContractUpdatedData is the payload for contract_updated events.
+type ContractUpdatedData struct {
+	ContractID string `json:"contract_id"`
+	Type       string `json:"type"`
+	Scope      string `json:"scope"`
+	Action     string `json:"action"` // "created", "updated", "violated"
+	SessionID  string `json:"session_id"`
+}
+
+// PREventData is the payload for pr_created / pr_updated events.
+type PREventData struct {
+	PRURL     string   `json:"pr_url"`
+	TaskID    string   `json:"task_id"`
+	SessionID string   `json:"session_id"`
+	Branch    string   `json:"branch"`
+	Files     []string `json:"files,omitempty"`
+	Action    string   `json:"action,omitempty"` // "created", "updated", "amended"
+}
+
+// ConflictDetectedData is the payload for conflict_detected events.
+type ConflictDetectedData struct {
+	Type        string   `json:"type"` // "textual", "behavioral", "contractual"
+	SessionA    string   `json:"session_a"`
+	SessionB    string   `json:"session_b"`
+	Files       []string `json:"files,omitempty"`
+	Description string   `json:"description"`
+}
+
+// MergeSuccessData is the payload for merge_success events.
+type MergeSuccessData struct {
+	TaskID         string   `json:"task_id"`
+	IntegrationRef string   `json:"integration_branch"`
+	Sessions       []string `json:"sessions"`
+	CommitSHA      string   `json:"commit_sha"`
 }
 
 // --- Constructors ---
