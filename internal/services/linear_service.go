@@ -9,8 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -56,31 +58,38 @@ func (s *LinearService) GetAuthURL(orgID, state string) (string, error) {
 }
 
 func (s *LinearService) ExchangeCode(ctx context.Context, orgID, code string) (*models.LinearConnection, error) {
-	body := map[string]string{
-		"grant_type":    "authorization_code",
-		"client_id":     s.clientID,
-		"client_secret": s.clientSecret,
-		"redirect_uri":  s.redirectURI,
-		"code":          code,
-	}
-	bodyJSON, _ := json.Marshal(body)
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("client_id", s.clientID)
+	form.Set("client_secret", s.clientSecret)
+	form.Set("redirect_uri", s.redirectURI)
+	form.Set("code", code)
 
-	resp, err := http.Post("https://api.linear.app/oauth/token", "application/json", bytes.NewReader(bodyJSON))
+	resp, err := http.PostForm("https://api.linear.app/oauth/token", form)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read token response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("linear token exchange returned %d: %s", resp.StatusCode, string(respBody))
+	}
 
 	var tokenResp struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w (body: %s)", err, string(respBody))
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("no access token in response")
+		return nil, fmt.Errorf("no access token in response (body: %s)", string(respBody))
 	}
 
 	wsID, wsName, err := s.fetchWorkspaceInfo(tokenResp.AccessToken)

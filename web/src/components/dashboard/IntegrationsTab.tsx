@@ -246,7 +246,7 @@ export default function IntegrationsTab() {
     (token: string, orgId: string, body: any) => api.integrations.linear.callback(token, orgId, body)
   )
 
-  // Handle OAuth callback — read ?code= from URL and route to correct provider
+  // Handle OAuth callback — read ?code= from URL, try Linear first then GitHub
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
@@ -259,16 +259,31 @@ export default function IntegrationsTab() {
 
     if (provider === 'linear') {
       exchangeLinearCode({ code, state: state || '' }).then(result => {
-        if (result) {
-          toast('success', 'Linear connected!')
+        if (result?.connected) {
+          toast('success', `Linear connected to ${result.workspace_name || 'workspace'}`)
           refetch()
         }
       })
-    } else {
+    } else if (provider === 'github') {
       exchangeGitHubCode({ code, state: state || '' }).then(result => {
         if (result?.connected) {
           toast('success', `GitHub connected as ${result.github_user}`)
           refetch()
+        }
+      })
+    } else {
+      // No provider flag (e.g. cross-domain localStorage lost) — try Linear first, fall back to GitHub
+      exchangeLinearCode({ code, state: state || '' }).then(result => {
+        if (result?.connected) {
+          toast('success', `Linear connected to ${result.workspace_name || 'workspace'}`)
+          refetch()
+        } else {
+          exchangeGitHubCode({ code, state: state || '' }).then(ghResult => {
+            if (ghResult?.connected) {
+              toast('success', `GitHub connected as ${ghResult.github_user}`)
+              refetch()
+            }
+          })
         }
       })
     }
