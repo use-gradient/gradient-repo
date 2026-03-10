@@ -429,3 +429,87 @@ CREATE TABLE IF NOT EXISTS task_settings (
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
+
+-- ═══════════════════════════════════════════════════════════════════
+-- Agent-Native VCS: Sessions, Change Bundles, Contracts, Context Objects
+-- ═══════════════════════════════════════════════════════════════════
+
+-- Agent sessions: bounded work units for each agent
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id VARCHAR(255) REFERENCES agent_tasks(id),
+    parent_session_id UUID REFERENCES agent_sessions(id),
+    org_id TEXT NOT NULL,
+    agent_role TEXT NOT NULL DEFAULT 'worker',
+    scope JSONB NOT NULL DEFAULT '{}',
+    initial_sha TEXT,
+    branch_name TEXT,
+    environment_id VARCHAR(255),
+    status TEXT NOT NULL DEFAULT 'pending',
+    contracts JSONB DEFAULT '[]',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_org ON agent_sessions(org_id);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_status ON agent_sessions(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_parent ON agent_sessions(parent_session_id);
+
+-- Change bundles: atomic code+context+decision units
+CREATE TABLE IF NOT EXISTS change_bundles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID REFERENCES agent_sessions(id) NOT NULL,
+    sequence INT NOT NULL,
+    git_patch TEXT,
+    commit_sha TEXT,
+    context_diff JSONB DEFAULT '{}',
+    decision_diff JSONB DEFAULT '{}',
+    test_results JSONB DEFAULT '[]',
+    policy_results JSONB DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(session_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_change_bundles_session ON change_bundles(session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_change_bundles_status ON change_bundles(status);
+
+-- Contracts: inter-agent agreements on API shapes, invariants, schemas
+CREATE TABLE IF NOT EXISTS contracts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id TEXT NOT NULL,
+    task_id VARCHAR(255) REFERENCES agent_tasks(id),
+    type TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    spec JSONB NOT NULL,
+    owner_session_id UUID REFERENCES agent_sessions(id),
+    consumers TEXT[] DEFAULT '{}',
+    version INT DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_contracts_org ON contracts(org_id);
+CREATE INDEX IF NOT EXISTS idx_contracts_task ON contracts(task_id);
+CREATE INDEX IF NOT EXISTS idx_contracts_owner ON contracts(owner_session_id);
+
+-- Context objects: structured, queryable context per branch
+CREATE TABLE IF NOT EXISTS context_objects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    type TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value JSONB NOT NULL,
+    source_session UUID REFERENCES agent_sessions(id),
+    version INT DEFAULT 1,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(org_id, branch, type, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_objects_branch ON context_objects(org_id, branch);
+CREATE INDEX IF NOT EXISTS idx_context_objects_type ON context_objects(org_id, branch, type);
+CREATE INDEX IF NOT EXISTS idx_context_objects_source ON context_objects(source_session);

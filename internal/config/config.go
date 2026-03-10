@@ -42,7 +42,7 @@ type Config struct {
 	RegistryUser string
 	RegistryPass string
 
-	// AWS (legacy, kept for migration)
+	// AWS (primary for compliance)
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSRegion          string
@@ -129,7 +129,7 @@ func Load() *Config {
 		RegistryPass:           getEnv("REGISTRY_PASS", ""),
 		AWSAccessKeyID:         getEnv("AWS_ACCESS_KEY_ID", ""),
 		AWSSecretAccessKey:     getEnv("AWS_SECRET_ACCESS_KEY", ""),
-		AWSRegion:              getEnv("AWS_REGION", "us-east-1"),
+		AWSRegion:              getEnv("AWS_REGION", "us-east-2"),
 		AWSAmiID:               getEnv("AWS_AMI_ID", ""),
 		AWSSecurityGroupID:     getEnv("AWS_SECURITY_GROUP_ID", ""),
 		AWSSubnetID:            getEnv("AWS_SUBNET_ID", ""),

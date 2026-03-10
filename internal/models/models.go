@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 )
 
@@ -467,4 +468,100 @@ type TaskSettings struct {
 	PRBaseBranch       string `json:"pr_base_branch"`
 	AutoDestroyEnv     bool   `json:"auto_destroy_env"`
 	EnvTTLMinutes      int    `json:"env_ttl_minutes"`
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent-Native VCS: Sessions, Change Bundles, Contracts
+// ═══════════════════════════════════════════════════════════════
+
+// AgentSession is a bounded block of work assigned to one agent.
+type AgentSession struct {
+	ID              string         `json:"id"`
+	TaskID          string         `json:"task_id"`
+	ParentSessionID *string        `json:"parent_session_id,omitempty"`
+	OrgID           string         `json:"org_id"`
+	AgentRole       string         `json:"agent_role"`
+	Scope           SessionScope   `json:"scope"`
+	InitialSHA      string         `json:"initial_sha,omitempty"`
+	BranchName      string         `json:"branch_name,omitempty"`
+	EnvironmentID   string         `json:"environment_id,omitempty"`
+	Status          string         `json:"status"`
+	Contracts       []ContractRef  `json:"contracts,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
+}
+
+// SessionScope defines what files/modules/APIs an agent session owns.
+type SessionScope struct {
+	OwnedPaths    []string `json:"owned_paths,omitempty"`
+	ReadOnlyPaths []string `json:"read_only_paths,omitempty"`
+	APIContracts  []string `json:"api_contracts,omitempty"`
+	TestSuites    []string `json:"test_suites,omitempty"`
+}
+
+// ContractRef is a lightweight reference to a contract.
+type ContractRef struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// ChangeBundle is an atomic unit of merge containing code+context+decision diffs.
+type ChangeBundle struct {
+	ID            string                 `json:"id"`
+	SessionID     string                 `json:"session_id"`
+	Sequence      int                    `json:"sequence"`
+	GitPatch      string                 `json:"git_patch,omitempty"`
+	CommitSHA     string                 `json:"commit_sha,omitempty"`
+	ContextDiff   map[string]interface{} `json:"context_diff,omitempty"`
+	DecisionDiff  map[string]interface{} `json:"decision_diff,omitempty"`
+	TestResults   []TestResult           `json:"test_results,omitempty"`
+	PolicyResults []PolicyResult         `json:"policy_results,omitempty"`
+	Status        string                 `json:"status"`
+	CreatedAt     time.Time              `json:"created_at"`
+}
+
+// TestResult records a test pass/fail from a change bundle.
+type TestResult struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"` // "passed", "failed", "skipped"
+	Duration string `json:"duration,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// PolicyResult records a policy check (static analysis, LLM review, etc.)
+type PolicyResult struct {
+	Name       string  `json:"name"`
+	Status     string  `json:"status"` // "passed", "failed", "warning"
+	Score      float64 `json:"score,omitempty"`
+	Details    string  `json:"details,omitempty"`
+}
+
+// Contract is an inter-agent agreement on API shapes, invariants, or schemas.
+type Contract struct {
+	ID             string          `json:"id"`
+	OrgID          string          `json:"org_id"`
+	TaskID         string          `json:"task_id,omitempty"`
+	Type           string          `json:"type"`
+	Scope          string          `json:"scope"`
+	Spec           json.RawMessage `json:"spec"`
+	OwnerSessionID string          `json:"owner_session_id,omitempty"`
+	Consumers      []string        `json:"consumers,omitempty"`
+	Version        int             `json:"version"`
+	Status         string          `json:"status"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+// ContextObject is a structured, queryable piece of context attached to a branch.
+type ContextObject struct {
+	ID            string          `json:"id"`
+	OrgID         string          `json:"org_id"`
+	Branch        string          `json:"branch"`
+	Type          string          `json:"type"`
+	Key           string          `json:"key"`
+	Value         json.RawMessage `json:"value"`
+	SourceSession string          `json:"source_session,omitempty"`
+	Version       int             `json:"version"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
