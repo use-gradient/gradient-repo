@@ -129,7 +129,7 @@ func (s *GitHubService) ExchangeCode(ctx context.Context, orgID, code string) (*
 func (s *GitHubService) GetConnection(ctx context.Context, orgID string) (*models.GitHubConnection, error) {
 	conn := &models.GitHubConnection{}
 	err := s.db.Pool.QueryRow(ctx, `
-		SELECT id, org_id, access_token, github_user, github_avatar, scopes, created_at, updated_at
+		SELECT id, org_id, access_token, COALESCE(github_user, ''), COALESCE(github_avatar, ''), COALESCE(scopes, ''), created_at, updated_at
 		FROM github_connections WHERE org_id = $1`, orgID,
 	).Scan(&conn.ID, &conn.OrgID, &conn.AccessToken, &conn.GitHubUser, &conn.GitHubAvatar,
 		&conn.Scopes, &conn.CreatedAt, &conn.UpdatedAt)
@@ -207,7 +207,7 @@ func (s *GitHubService) CreateWebhook(ctx context.Context, orgID, repoFullName, 
 	body := map[string]interface{}{
 		"name":   "web",
 		"active": true,
-		"events": []string{"create", "push", "delete"},
+		"events": []string{"create", "push", "delete", "pull_request"},
 		"config": map[string]string{
 			"url":          s.webhookURL,
 			"content_type": "json",

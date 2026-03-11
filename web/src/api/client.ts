@@ -52,11 +52,17 @@ export const api = {
   // ── Health ──
   health: () => request<{ status: string; version: string; time: string }>('GET', '/health'),
 
+  // ── Providers ──
+  providers: {
+    list: (token: string, orgId: string) =>
+      request<{ default: string; available: string[]; regions: Record<string, string[]> }>('GET', '/providers', undefined, token, orgId),
+  },
+
   // ── Environments ──
   envs: {
     list:    (token: string, orgId: string) => request<any[]>('GET', '/environments', undefined, token, orgId),
     get:     (token: string, orgId: string, id: string) => request<any>('GET', `/environments/${id}`, undefined, token, orgId),
-    create:  (token: string, orgId: string, body: { name: string; size: string; region: string; context_branch?: string }) =>
+    create:  (token: string, orgId: string, body: { name: string; provider?: string; size: string; region: string; context_branch?: string }) =>
       request<any>('POST', '/environments', body, token, orgId),
     destroy: (token: string, orgId: string, id: string) => request<any>('DELETE', `/environments/${id}`, undefined, token, orgId),
     health:  (token: string, orgId: string, id: string) => request<any>('GET', `/environments/${id}/health`, undefined, token, orgId),
@@ -84,9 +90,10 @@ export const api = {
 
   // ── Events ──
   events: {
-    list:    (token: string, orgId: string, params?: Record<string, string>) => {
+    list:    async (token: string, orgId: string, params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : ''
-      return request<any[]>('GET', `/events${qs}`, undefined, token, orgId)
+      const batch = await request<{ events: any[]; has_more: boolean; last_seq: number; count: number }>('GET', `/events${qs}`, undefined, token, orgId)
+      return batch.events || []
     },
     publish: (token: string, orgId: string, body: any) => request<any>('POST', '/events', body, token, orgId),
     stats:   (token: string, orgId: string) => request<any>('GET', '/events/stats', undefined, token, orgId),

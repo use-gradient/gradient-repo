@@ -21,6 +21,7 @@ func NewContextService(store *gradctx.Store) *ContextService {
 type SaveContextRequest struct {
 	Branch            string
 	OrgID             string
+	RepoFullName      string
 	CommitSHA         string
 	InstalledPackages []models.InstalledPackage
 	PreviousFailures  []models.TestFailure
@@ -63,6 +64,7 @@ func (s *ContextService) SaveContext(ctx context.Context, req *SaveContextReques
 		ID:                uuid.New().String(),
 		Branch:            req.Branch,
 		OrgID:             req.OrgID,
+		RepoFullName:      req.RepoFullName,
 		CommitSHA:         req.CommitSHA,
 		InstalledPackages: req.InstalledPackages,
 		PreviousFailures:  req.PreviousFailures,

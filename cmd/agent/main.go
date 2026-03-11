@@ -167,6 +167,11 @@ func main() {
 		go watchLoop(ctx, cfg, bus)
 	}
 
+	// Start outbox watcher (picks up events from MCP server and publishes to NATS)
+	if bus != nil && cfg.OrgID != "" && cfg.Branch != "" {
+		go outboxLoop(ctx, cfg, bus)
+	}
+
 	// Start local health endpoint
 	go func() {
 		mux := http.NewServeMux()
@@ -701,6 +706,110 @@ func detectEnvChanges(ctx context.Context, cfg *AgentConfig, bus livectx.Bus, tr
 	}
 
 	tracker.envVars = current
+}
+
+// --- Outbox Watcher ---
+
+// outboxLoop watches /gradient/context/outbox.jsonl inside the container for events
+// published by the MCP context server. It reads new lines and publishes them to NATS.
+func outboxLoop(ctx context.Context, cfg *AgentConfig, bus livectx.Bus) {
+	outboxPath := filepath.Join(cfg.ContextDir, "outbox.jsonl")
+	// The outbox file lives on the host at cfg.ContextDir (default /gradient/context).
+	// The MCP server inside the container writes to the same path via the shared volume.
+	// We also check inside the container in case the volume mount differs.
+	containerOutbox := "/gradient/context/outbox.jsonl"
+
+	log.Printf("[agent] Starting outbox watcher (host=%s, container=%s)", outboxPath, containerOutbox)
+
+	var lastOffset int64
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Try host path first, then copy from container if not found
+			data, err := os.ReadFile(outboxPath)
+			if err != nil {
+				// Try to copy from container
+				cmd := exec.Command("docker", "cp", "gradient-env:"+containerOutbox, outboxPath)
+				if cpErr := cmd.Run(); cpErr != nil {
+					continue
+				}
+				data, err = os.ReadFile(outboxPath)
+				if err != nil {
+					continue
+				}
+			}
+
+			if int64(len(data)) <= lastOffset {
+				continue
+			}
+
+			newData := data[lastOffset:]
+			lastOffset = int64(len(data))
+
+			lines := strings.Split(string(newData), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+
+				var entry struct {
+					Type      string          `json:"type"`
+					Message   string          `json:"message"`
+					Timestamp string          `json:"timestamp"`
+					Data      json.RawMessage `json:"data,omitempty"`
+				}
+				if json.Unmarshal([]byte(line), &entry) != nil {
+					continue
+				}
+
+				eventType := mapOutboxType(entry.Type)
+				eventData := map[string]interface{}{
+					"message": entry.Message,
+				}
+				if entry.Data != nil {
+					var extra map[string]interface{}
+					if json.Unmarshal(entry.Data, &extra) == nil {
+						for k, v := range extra {
+							eventData[k] = v
+						}
+					}
+				}
+
+				evt, evtErr := livectx.NewEvent(eventType, cfg.OrgID, cfg.Branch, cfg.EnvID, eventData)
+				if evtErr != nil {
+					log.Printf("[agent] Failed to create outbox event: %v", evtErr)
+					continue
+				}
+				evt.WithSource("mcp-context")
+				if pubErr := bus.Publish(ctx, evt); pubErr != nil {
+					log.Printf("[agent] Failed to publish outbox event: %v", pubErr)
+				} else {
+					log.Printf("[agent] Published outbox event: [%s] %s", entry.Type, entry.Message)
+				}
+			}
+		}
+	}
+}
+
+func mapOutboxType(t string) livectx.EventType {
+	switch t {
+	case "error_encountered":
+		return livectx.EventErrorEncountered
+	case "pattern_learned":
+		return livectx.EventPatternLearned
+	case "package_installed":
+		return livectx.EventPackageInstalled
+	case "config_changed":
+		return livectx.EventConfigChanged
+	default:
+		return livectx.EventCustom
+	}
 }
 
 // --- Snapshots ---

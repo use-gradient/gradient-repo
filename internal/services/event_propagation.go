@@ -52,12 +52,14 @@ func (ep *EventPropagationService) StartListening(ctx context.Context, orgID str
 		case livectx.EventContextStale:
 			return ep.handleContextStale(handlerCtx, event)
 		}
+
+		if ep.isPropagatableEvent(event.Type) && event.RepoFullName != "" {
+			return ep.propagateAcrossBranches(handlerCtx, event)
+		}
 		return nil
 	}
 
-	subject := livectx.NATSSubjectWildcard(orgID)
-	_ = subject // used implicitly by Subscribe
-	return ep.eventBus.Subscribe(ctx, orgID, ">", "event-propagation", handler)
+	return ep.eventBus.SubscribeAll(ctx, orgID, "event-propagation", handler)
 }
 
 func (ep *EventPropagationService) handleBugDiscovered(ctx context.Context, event *livectx.Event) error {
@@ -195,4 +197,82 @@ func scopeOverlaps(scope models.SessionScope, files []string) bool {
 		}
 	}
 	return false
+}
+
+var propagatableTypes = map[livectx.EventType]bool{
+	livectx.EventPackageInstalled: true,
+	livectx.EventPatternLearned:   true,
+	livectx.EventConfigChanged:    true,
+	livectx.EventDependencyAdded:  true,
+	livectx.EventBugDiscovered:    true,
+	livectx.EventContractUpdated:  true,
+	livectx.EventTestFailed:       true,
+	livectx.EventTestFixed:        true,
+}
+
+func (ep *EventPropagationService) isPropagatableEvent(t livectx.EventType) bool {
+	return propagatableTypes[t]
+}
+
+func (ep *EventPropagationService) propagateAcrossBranches(ctx context.Context, event *livectx.Event) error {
+	if event.Source == "propagation" {
+		return nil
+	}
+
+	branches, err := ep.findRepoBranches(ctx, event.OrgID, event.RepoFullName)
+	if err != nil {
+		return fmt.Errorf("failed to find repo branches: %w", err)
+	}
+
+	for _, branch := range branches {
+		if branch == event.Branch {
+			continue
+		}
+
+		idempKey := fmt.Sprintf("%s:%s", event.ID, branch)
+
+		propagated, _ := livectx.NewEvent(event.Type, event.OrgID, branch, event.EnvID, map[string]interface{}{
+			"propagated_from":   event.Branch,
+			"original_event_id": event.ID,
+			"original_data":    event.Data,
+		})
+		if propagated == nil {
+			continue
+		}
+		propagated.RepoFullName = event.RepoFullName
+		propagated.IdempotencyKey = idempKey
+		propagated.CausalID = event.ID
+		propagated = propagated.WithSource("propagation")
+
+		if ep.meshPublisher != nil {
+			if err := ep.meshPublisher.Publish(ctx, propagated); err != nil {
+				log.Printf("[propagation] Failed to propagate event %s to branch %s: %v", event.ID, branch, err)
+			} else {
+				log.Printf("[propagation] Propagated %s event from %s to %s (repo %s)", event.Type, event.Branch, branch, event.RepoFullName)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (ep *EventPropagationService) findRepoBranches(ctx context.Context, orgID, repoFullName string) ([]string, error) {
+	rows, err := ep.db.Pool.Query(ctx,
+		`SELECT DISTINCT context_branch FROM environments
+		 WHERE org_id = $1 AND repo_full_name = $2 AND status IN ('running', 'sleeping') AND context_branch != ''`,
+		orgID, repoFullName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var branches []string
+	for rows.Next() {
+		var branch string
+		if err := rows.Scan(&branch); err != nil {
+			continue
+		}
+		branches = append(branches, branch)
+	}
+	return branches, nil
 }

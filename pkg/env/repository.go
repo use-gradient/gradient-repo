@@ -35,12 +35,12 @@ func (r *Repository) Create(ctx context.Context, env *models.Environment) error 
 	}
 
 	query := `
-		INSERT INTO environments (id, name, org_id, provider, region, size, cluster_name, status, resources, config, context_branch, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		INSERT INTO environments (id, name, org_id, repo_full_name, provider, region, size, cluster_name, status, resources, config, context_branch, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`
 
 	_, err = r.db.Pool.Exec(ctx, query,
-		env.ID, env.Name, env.OrgID, env.Provider, env.Region, env.Size, env.ClusterName,
+		env.ID, env.Name, env.OrgID, env.RepoFullName, env.Provider, env.Region, env.Size, env.ClusterName,
 		env.Status, resourcesJSON, configJSON, env.ContextBranch, env.CreatedAt, env.UpdatedAt,
 	)
 	return err
@@ -48,7 +48,8 @@ func (r *Repository) Create(ctx context.Context, env *models.Environment) error 
 
 func (r *Repository) GetByID(ctx context.Context, id string) (*models.Environment, error) {
 	query := `
-		SELECT id, name, org_id, provider, region, size, cluster_name, status, resources, config, context_branch, created_at, updated_at, destroyed_at
+		SELECT id, name, org_id, COALESCE(repo_full_name, ''), provider, region, size, COALESCE(cluster_name, ''), COALESCE(ip_address, ''),
+		       status, resources, config, context_branch, created_at, updated_at, destroyed_at
 		FROM environments
 		WHERE id = $1
 	`
@@ -58,7 +59,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*models.Environmen
 	var resourcesJSON, configJSON []byte
 
 	err := r.db.Pool.QueryRow(ctx, query, id).Scan(
-		&env.ID, &env.Name, &env.OrgID, &env.Provider, &env.Region, &env.Size, &env.ClusterName,
+		&env.ID, &env.Name, &env.OrgID, &env.RepoFullName, &env.Provider, &env.Region, &env.Size, &env.ClusterName, &env.IPAddress,
 		&env.Status, &resourcesJSON, &configJSON, &env.ContextBranch, &env.CreatedAt, &env.UpdatedAt, &destroyedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -82,7 +83,8 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*models.Environmen
 
 func (r *Repository) GetByOrgID(ctx context.Context, orgID string) ([]*models.Environment, error) {
 	query := `
-		SELECT id, name, org_id, provider, region, size, cluster_name, status, resources, config, context_branch, created_at, updated_at, destroyed_at
+		SELECT id, name, org_id, COALESCE(repo_full_name, ''), provider, region, size, COALESCE(cluster_name, ''), COALESCE(ip_address, ''),
+		       status, resources, config, context_branch, created_at, updated_at, destroyed_at
 		FROM environments
 		WHERE org_id = $1 AND status != 'destroyed'
 		ORDER BY created_at DESC
@@ -101,7 +103,7 @@ func (r *Repository) GetByOrgID(ctx context.Context, orgID string) ([]*models.En
 		var resourcesJSON, configJSON []byte
 
 		err := rows.Scan(
-			&env.ID, &env.Name, &env.OrgID, &env.Provider, &env.Region, &env.Size, &env.ClusterName,
+			&env.ID, &env.Name, &env.OrgID, &env.RepoFullName, &env.Provider, &env.Region, &env.Size, &env.ClusterName, &env.IPAddress,
 			&env.Status, &resourcesJSON, &configJSON, &env.ContextBranch, &env.CreatedAt, &env.UpdatedAt, &destroyedAt,
 		)
 		if err != nil {
@@ -129,7 +131,8 @@ func (r *Repository) GetByOrgID(ctx context.Context, orgID string) ([]*models.En
 
 func (r *Repository) GetByOrgAndBranch(ctx context.Context, orgID, branch string) (*models.Environment, error) {
 	query := `
-		SELECT id, name, org_id, provider, region, size, cluster_name, status, resources, config, context_branch, created_at, updated_at, destroyed_at
+		SELECT id, name, org_id, COALESCE(repo_full_name, ''), provider, region, size, COALESCE(cluster_name, ''), COALESCE(ip_address, ''),
+		       status, resources, config, context_branch, created_at, updated_at, destroyed_at
 		FROM environments
 		WHERE org_id = $1 AND context_branch = $2 AND status = 'running'
 		LIMIT 1
@@ -140,11 +143,48 @@ func (r *Repository) GetByOrgAndBranch(ctx context.Context, orgID, branch string
 	var resourcesJSON, configJSON []byte
 
 	err := r.db.Pool.QueryRow(ctx, query, orgID, branch).Scan(
-		&env.ID, &env.Name, &env.OrgID, &env.Provider, &env.Region, &env.Size, &env.ClusterName,
+		&env.ID, &env.Name, &env.OrgID, &env.RepoFullName, &env.Provider, &env.Region, &env.Size, &env.ClusterName, &env.IPAddress,
 		&env.Status, &resourcesJSON, &configJSON, &env.ContextBranch, &env.CreatedAt, &env.UpdatedAt, &destroyedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil // No running env for this branch — not an error
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	env.DestroyedAt = destroyedAt
+	if err := json.Unmarshal(resourcesJSON, &env.Resources); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal resources: %w", err)
+	}
+	if configJSON != nil {
+		if err := json.Unmarshal(configJSON, &env.Config); err != nil {
+			env.Config = map[string]interface{}{} // tolerate bad data
+		}
+	}
+	return &env, nil
+}
+
+func (r *Repository) GetByOrgRepoAndBranch(ctx context.Context, orgID, repoFullName, branch string) (*models.Environment, error) {
+	query := `
+		SELECT id, name, org_id, COALESCE(repo_full_name, ''), provider, region, size, COALESCE(cluster_name, ''), COALESCE(ip_address, ''),
+		       status, resources, config, context_branch, created_at, updated_at, destroyed_at
+		FROM environments
+		WHERE org_id = $1 AND repo_full_name = $2 AND context_branch = $3 AND status IN ('running', 'sleeping')
+		ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END
+		LIMIT 1
+	`
+
+	var env models.Environment
+	var destroyedAt *time.Time
+	var resourcesJSON, configJSON []byte
+
+	err := r.db.Pool.QueryRow(ctx, query, orgID, repoFullName, branch).Scan(
+		&env.ID, &env.Name, &env.OrgID, &env.RepoFullName, &env.Provider, &env.Region, &env.Size, &env.ClusterName, &env.IPAddress,
+		&env.Status, &resourcesJSON, &configJSON, &env.ContextBranch, &env.CreatedAt, &env.UpdatedAt, &destroyedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil // No running/sleeping env for this org/repo/branch — not an error
 	}
 	if err != nil {
 		return nil, err
@@ -174,12 +214,12 @@ func (r *Repository) Update(ctx context.Context, env *models.Environment) error 
 
 	query := `
 		UPDATE environments
-		SET name = $2, status = $3, cluster_name = $4, resources = $5, config = $6, context_branch = $7, updated_at = $8, destroyed_at = $9, size = $10
+		SET name = $2, status = $3, cluster_name = $4, resources = $5, config = $6, context_branch = $7, updated_at = $8, destroyed_at = $9, size = $10, repo_full_name = $11
 		WHERE id = $1
 	`
 
 	_, err = r.db.Pool.Exec(ctx, query,
-		env.ID, env.Name, env.Status, env.ClusterName, resourcesJSON, configJSON, env.ContextBranch, env.UpdatedAt, env.DestroyedAt, env.Size,
+		env.ID, env.Name, env.Status, env.ClusterName, resourcesJSON, configJSON, env.ContextBranch, env.UpdatedAt, env.DestroyedAt, env.Size, env.RepoFullName,
 	)
 	return err
 }

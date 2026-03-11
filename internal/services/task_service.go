@@ -16,11 +16,13 @@ import (
 // TaskService orchestrates the full agent-task lifecycle:
 // Linear issue → provision env → run Claude Code → save context → PR → report back
 type TaskService struct {
-	db             *db.DB
-	envService     *EnvService
-	claudeService  *ClaudeService
-	linearService  *LinearService
-	contextService *ContextService
+	db              *db.DB
+	envService      *EnvService
+	claudeService   *ClaudeService
+	linearService   *LinearService
+	contextService  *ContextService
+	defaultProvider string // from DEV_ENV_SRC config
+	defaultRegion   string // provider-specific default region
 }
 
 func NewTaskService(
@@ -29,13 +31,27 @@ func NewTaskService(
 	claudeService *ClaudeService,
 	linearService *LinearService,
 	contextService *ContextService,
+	defaultRegion string,
 ) *TaskService {
+	defaultProvider := "aws"
+	if envService != nil && envService.config.DefaultProvider != "" {
+		defaultProvider = envService.config.DefaultProvider
+	}
+	if defaultRegion == "" {
+		if defaultProvider == "hetzner" {
+			defaultRegion = "fsn1"
+		} else {
+			defaultRegion = "us-east-2"
+		}
+	}
 	return &TaskService{
-		db:             database,
-		envService:     envService,
-		claudeService:  claudeService,
-		linearService:  linearService,
-		contextService: contextService,
+		db:              database,
+		envService:      envService,
+		claudeService:   claudeService,
+		linearService:   linearService,
+		defaultProvider: defaultProvider,
+		defaultRegion:   defaultRegion,
+		contextService:  contextService,
 	}
 }
 
@@ -75,6 +91,7 @@ func (s *TaskService) CreateTask(ctx context.Context, orgID string, req CreateTa
 	task := &models.AgentTask{
 		ID:               uuid.New().String(),
 		OrgID:            orgID,
+		ParentTaskID:     req.ParentTaskID,
 		Title:            req.Title,
 		Description:      req.Description,
 		Prompt:           req.Prompt,
@@ -96,12 +113,17 @@ func (s *TaskService) CreateTask(ctx context.Context, orgID string, req CreateTa
 		}
 	}
 
+	var parentTaskID interface{} = nil
+	if task.ParentTaskID != "" {
+		parentTaskID = task.ParentTaskID
+	}
+
 	_, err := s.db.Pool.Exec(ctx, `
-		INSERT INTO agent_tasks (id, org_id, linear_issue_id, linear_identifier, linear_url,
+		INSERT INTO agent_tasks (id, org_id, parent_task_id, linear_issue_id, linear_identifier, linear_url,
 			title, description, prompt, branch, repo_full_name, status,
 			max_retries, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-		task.ID, task.OrgID, task.LinearIssueID, task.LinearIdentifier, task.LinearURL,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		task.ID, task.OrgID, parentTaskID, task.LinearIssueID, task.LinearIdentifier, task.LinearURL,
 		task.Title, task.Description, task.Prompt, task.Branch, task.RepoFullName, task.Status,
 		task.MaxRetries, task.CreatedAt, task.UpdatedAt,
 	)
@@ -119,6 +141,7 @@ type CreateTaskRequest struct {
 	Prompt           string `json:"prompt"`
 	Branch           string `json:"branch"`
 	RepoFullName     string `json:"repo_full_name"`
+	ParentTaskID     string `json:"parent_task_id"`
 	LinearIssueID    string `json:"linear_issue_id"`
 	LinearIdentifier string `json:"linear_identifier"`
 	LinearURL        string `json:"linear_url"`
@@ -127,16 +150,23 @@ type CreateTaskRequest struct {
 func (s *TaskService) GetTask(ctx context.Context, orgID, taskID string) (*models.AgentTask, error) {
 	task := &models.AgentTask{}
 	var outputJSON *string
+	var parentTaskID *string
 
 	err := s.db.Pool.QueryRow(ctx, `
-		SELECT id, org_id, linear_issue_id, linear_identifier, linear_url,
-			title, description, prompt, environment_id, branch, repo_full_name,
-			status, output_summary, output_json, commit_sha, pr_url, error_message,
-			started_at, completed_at, duration_seconds, tokens_used, estimated_cost,
-			retry_count, max_retries, context_saved, snapshot_taken, created_at, updated_at
+		SELECT id, org_id, parent_task_id,
+			COALESCE(linear_issue_id, ''), COALESCE(linear_identifier, ''), COALESCE(linear_url, ''),
+			title, COALESCE(description, ''), COALESCE(prompt, ''),
+			COALESCE(environment_id, ''), COALESCE(branch, ''), COALESCE(repo_full_name, ''),
+			status, COALESCE(output_summary, ''), output_json,
+			COALESCE(commit_sha, ''), COALESCE(pr_url, ''), COALESCE(error_message, ''),
+			started_at, completed_at,
+			COALESCE(duration_seconds, 0), COALESCE(tokens_used, 0), COALESCE(estimated_cost, 0),
+			COALESCE(retry_count, 0), COALESCE(max_retries, 2), COALESCE(context_saved, false), COALESCE(snapshot_taken, false),
+			created_at, updated_at
 		FROM agent_tasks WHERE id = $1 AND org_id = $2`, taskID, orgID,
 	).Scan(
-		&task.ID, &task.OrgID, &task.LinearIssueID, &task.LinearIdentifier, &task.LinearURL,
+		&task.ID, &task.OrgID, &parentTaskID,
+		&task.LinearIssueID, &task.LinearIdentifier, &task.LinearURL,
 		&task.Title, &task.Description, &task.Prompt, &task.EnvironmentID, &task.Branch, &task.RepoFullName,
 		&task.Status, &task.OutputSummary, &outputJSON, &task.CommitSHA, &task.PRURL, &task.ErrorMessage,
 		&task.StartedAt, &task.CompletedAt, &task.DurationSeconds, &task.TokensUsed, &task.EstimatedCost,
@@ -149,18 +179,34 @@ func (s *TaskService) GetTask(ctx context.Context, orgID, taskID string) (*model
 		return nil, err
 	}
 
+	if parentTaskID != nil {
+		task.ParentTaskID = *parentTaskID
+	}
 	if outputJSON != nil {
 		json.Unmarshal([]byte(*outputJSON), &task.OutputJSON)
 	}
 	return task, nil
 }
 
+func (s *TaskService) TaskExistsForLinearIssue(ctx context.Context, orgID, linearIssueID string) (bool, error) {
+	var count int
+	err := s.db.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_tasks WHERE org_id = $1 AND linear_issue_id = $2`,
+		orgID, linearIssueID,
+	).Scan(&count)
+	return count > 0, err
+}
+
 func (s *TaskService) ListTasks(ctx context.Context, orgID, status string, limit int) ([]*models.AgentTask, error) {
-	query := `SELECT id, org_id, linear_issue_id, linear_identifier, linear_url,
-		title, description, prompt, environment_id, branch, repo_full_name,
-		status, output_summary, commit_sha, pr_url, error_message,
-		started_at, completed_at, duration_seconds, tokens_used, estimated_cost,
-		retry_count, max_retries, context_saved, snapshot_taken, created_at, updated_at
+	query := `SELECT id, org_id, parent_task_id,
+		COALESCE(linear_issue_id, ''), COALESCE(linear_identifier, ''), COALESCE(linear_url, ''),
+		title, COALESCE(description, ''), COALESCE(prompt, ''),
+		COALESCE(environment_id, ''), COALESCE(branch, ''), COALESCE(repo_full_name, ''),
+		status, COALESCE(output_summary, ''), COALESCE(commit_sha, ''), COALESCE(pr_url, ''), COALESCE(error_message, ''),
+		started_at, completed_at,
+		COALESCE(duration_seconds, 0), COALESCE(tokens_used, 0), COALESCE(estimated_cost, 0),
+		COALESCE(retry_count, 0), COALESCE(max_retries, 2), COALESCE(context_saved, false), COALESCE(snapshot_taken, false),
+		created_at, updated_at
 		FROM agent_tasks WHERE org_id = $1`
 
 	args := []interface{}{orgID}
@@ -188,8 +234,10 @@ func (s *TaskService) ListTasks(ctx context.Context, orgID, status string, limit
 	var tasks []*models.AgentTask
 	for rows.Next() {
 		task := &models.AgentTask{}
+		var parentTaskID *string
 		err := rows.Scan(
-			&task.ID, &task.OrgID, &task.LinearIssueID, &task.LinearIdentifier, &task.LinearURL,
+			&task.ID, &task.OrgID, &parentTaskID,
+			&task.LinearIssueID, &task.LinearIdentifier, &task.LinearURL,
 			&task.Title, &task.Description, &task.Prompt, &task.EnvironmentID, &task.Branch, &task.RepoFullName,
 			&task.Status, &task.OutputSummary, &task.CommitSHA, &task.PRURL, &task.ErrorMessage,
 			&task.StartedAt, &task.CompletedAt, &task.DurationSeconds, &task.TokensUsed, &task.EstimatedCost,
@@ -197,6 +245,9 @@ func (s *TaskService) ListTasks(ctx context.Context, orgID, status string, limit
 		)
 		if err != nil {
 			return nil, err
+		}
+		if parentTaskID != nil {
+			task.ParentTaskID = *parentTaskID
 		}
 		tasks = append(tasks, task)
 	}
@@ -316,6 +367,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, orgID, taskID string, re
 		}()
 	}
 
+	s.checkAndCompleteParent(ctx, orgID, taskID)
 	return nil
 }
 
@@ -331,7 +383,11 @@ type CompleteTaskRequest struct {
 }
 
 func (s *TaskService) FailTask(ctx context.Context, orgID, taskID, errorMsg string) error {
-	return s.failTask(ctx, taskID, errorMsg)
+	if err := s.failTask(ctx, taskID, errorMsg); err != nil {
+		return err
+	}
+	s.checkAndCompleteParent(ctx, orgID, taskID)
+	return nil
 }
 
 func (s *TaskService) failTask(ctx context.Context, taskID, errorMsg string) error {
@@ -347,6 +403,54 @@ func (s *TaskService) failTask(ctx context.Context, taskID, errorMsg string) err
 	}
 	s.addLog(ctx, taskID, "failed", "failed", errorMsg, nil)
 	return nil
+}
+
+// checkAndCompleteParent checks if the given task has a parent, and if all siblings
+// are terminal, marks the parent as complete (or failed if any sub-task failed).
+func (s *TaskService) checkAndCompleteParent(ctx context.Context, orgID, taskID string) {
+	var parentID *string
+	s.db.Pool.QueryRow(ctx, `SELECT parent_task_id FROM agent_tasks WHERE id = $1`, taskID).Scan(&parentID)
+	if parentID == nil || *parentID == "" {
+		return
+	}
+
+	var total, terminal, failed int
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status IN ('complete', 'failed', 'cancelled')),
+			COUNT(*) FILTER (WHERE status = 'failed')
+		FROM agent_tasks WHERE parent_task_id = $1`, *parentID,
+	).Scan(&total, &terminal, &failed)
+	if err != nil || total == 0 || terminal < total {
+		return
+	}
+
+	now := time.Now()
+	if failed > 0 {
+		_, _ = s.db.Pool.Exec(ctx, `
+			UPDATE agent_tasks SET status = 'failed',
+				error_message = $2, completed_at = $3,
+				duration_seconds = CASE WHEN started_at IS NOT NULL
+					THEN EXTRACT(EPOCH FROM ($3::timestamp - started_at))::int ELSE 0 END,
+				updated_at = NOW()
+			WHERE id = $1 AND status = 'running'`,
+			*parentID, fmt.Sprintf("%d of %d sub-tasks failed", failed, total), now)
+		s.addLog(ctx, *parentID, "completed", "failed",
+			fmt.Sprintf("Parent task failed: %d/%d sub-tasks failed", failed, total), nil)
+		log.Printf("[task] Parent task %s marked failed (%d/%d sub-tasks failed)", *parentID, failed, total)
+	} else {
+		_, _ = s.db.Pool.Exec(ctx, `
+			UPDATE agent_tasks SET status = 'complete', completed_at = $2,
+				duration_seconds = CASE WHEN started_at IS NOT NULL
+					THEN EXTRACT(EPOCH FROM ($2::timestamp - started_at))::int ELSE 0 END,
+				output_summary = $3, updated_at = NOW()
+			WHERE id = $1 AND status = 'running'`,
+			*parentID, now, fmt.Sprintf("All %d sub-tasks completed successfully", total))
+		s.addLog(ctx, *parentID, "completed", "completed",
+			fmt.Sprintf("All %d sub-tasks completed", total), nil)
+		log.Printf("[task] Parent task %s marked complete (all %d sub-tasks done)", *parentID, total)
+	}
 }
 
 // ─── Task Logs ──────────────────────────────────────────────────────────
@@ -417,8 +521,8 @@ func (s *TaskService) GetSettings(ctx context.Context, orgID string) (*models.Ta
 			InstanceStrategy:   "one_per_task",
 			MaxConcurrentTasks: 3,
 			DefaultEnvSize:     "small",
-			DefaultEnvProvider: "hetzner",
-			DefaultEnvRegion:   "fsn1",
+			DefaultEnvProvider: s.defaultProvider,
+			DefaultEnvRegion:   s.defaultRegion,
 			AutoCreatePR:       true,
 			PRBaseBranch:       "main",
 			AutoDestroyEnv:     true,

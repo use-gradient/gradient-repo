@@ -11,10 +11,12 @@ type Environment struct {
 	ID            string                 `json:"id"`
 	Name          string                 `json:"name"`
 	OrgID         string                 `json:"org_id"`
+	RepoFullName  string                 `json:"repo_full_name,omitempty"`
 	Provider      string                 `json:"provider"`       // cloud provider name ("hetzner", "aws", "gcp", etc.)
 	Region        string                 `json:"region"`         // provider-specific region/location
 	Size          string                 `json:"size"`           // abstract size ("small", "medium", "large", "gpu")
 	ClusterName   string                 `json:"cluster_name,omitempty"` // provider-specific reference (server ID, instance ID, etc.)
+	IPAddress     string                 `json:"ip_address,omitempty"`   // public IP (for SSH-based providers like Hetzner)
 	Status        string                 `json:"status"`
 	Resources     ResourceSpec           `json:"resources"`
 	Config        map[string]interface{} `json:"config,omitempty"`
@@ -178,6 +180,7 @@ type Context struct {
 	ID                string                 `json:"id"`
 	Branch            string                 `json:"branch"`
 	OrgID             string                 `json:"org_id"`
+	RepoFullName      string                 `json:"repo_full_name,omitempty"`
 	CommitSHA         string                 `json:"commit_sha,omitempty"`
 	InstalledPackages []InstalledPackage     `json:"installed_packages"`
 	PreviousFailures  []TestFailure          `json:"previous_failures"`
@@ -417,6 +420,7 @@ func MaskAPIKey(key string) string {
 type AgentTask struct {
 	ID               string     `json:"id"`
 	OrgID            string     `json:"org_id"`
+	ParentTaskID     string     `json:"parent_task_id,omitempty"`
 	LinearIssueID    string     `json:"linear_issue_id,omitempty"`
 	LinearIdentifier string     `json:"linear_identifier,omitempty"`
 	LinearURL        string     `json:"linear_url,omitempty"`
@@ -556,6 +560,7 @@ type Contract struct {
 type ContextObject struct {
 	ID            string          `json:"id"`
 	OrgID         string          `json:"org_id"`
+	RepoFullName  string          `json:"repo_full_name,omitempty"`
 	Branch        string          `json:"branch"`
 	Type          string          `json:"type"`
 	Key           string          `json:"key"`

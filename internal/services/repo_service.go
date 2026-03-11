@@ -74,6 +74,8 @@ func (s *RepoService) HandleWebhookEvent(ctx context.Context, eventType string, 
 		return s.handlePush(ctx, payload)
 	case "delete":
 		return s.handleBranchDelete(ctx, payload)
+	case "pull_request":
+		return s.handlePullRequest(ctx, payload)
 	default:
 		log.Printf("[repo] Ignoring GitHub event: %s", eventType)
 		return nil
@@ -175,7 +177,7 @@ func (s *RepoService) handleBranchCreate(ctx context.Context, payload json.RawMe
 
 	// Find all repo connections for this repo
 	rows, err := s.db.Pool.Query(ctx,
-		`SELECT org_id, auto_fork_enabled FROM repo_connections WHERE repo_full_name = $1 AND installation_id = $2`,
+		`SELECT org_id, auto_fork_enabled FROM repo_connections WHERE repo_full_name = $1 AND (installation_id = $2 OR installation_id = 0)`,
 		repoFullName, installationID,
 	)
 	if err != nil {
@@ -196,7 +198,7 @@ func (s *RepoService) handleBranchCreate(ctx context.Context, payload json.RawMe
 		}
 
 		// Auto-fork: copy context from parent branch to new branch
-		if err := s.autoForkContext(ctx, orgID, parentBranch, newBranch); err != nil {
+		if err := s.autoForkContext(ctx, orgID, parentBranch, newBranch, repoFullName); err != nil {
 			log.Printf("[repo] Failed to auto-fork context for org %s: %v", orgID, err)
 		}
 
@@ -204,13 +206,18 @@ func (s *RepoService) handleBranchCreate(ctx context.Context, payload json.RawMe
 		if err := s.autoForkSnapshot(ctx, orgID, parentBranch, newBranch); err != nil {
 			log.Printf("[repo] Failed to auto-fork snapshot for org %s: %v", orgID, err)
 		}
+
+		// Auto-fork: create environment for the new branch from parent's snapshot
+		if err := s.autoForkEnvironment(ctx, orgID, repoFullName, parentBranch, newBranch); err != nil {
+			log.Printf("[repo] Failed to auto-fork environment for org %s: %v", orgID, err)
+		}
 	}
 
 	return nil
 }
 
 // autoForkContext copies context from parent branch to new branch
-func (s *RepoService) autoForkContext(ctx context.Context, orgID, parentBranch, newBranch string) error {
+func (s *RepoService) autoForkContext(ctx context.Context, orgID, parentBranch, newBranch string, repoFullName ...string) error {
 	// Read parent context
 	var parentCtx struct {
 		InstalledPackages json.RawMessage
@@ -238,13 +245,16 @@ func (s *RepoService) autoForkContext(ctx context.Context, orgID, parentBranch, 
 		return fmt.Errorf("failed to read parent context: %w", err)
 	}
 
-	// Insert forked context for new branch
+	repo := ""
+	if len(repoFullName) > 0 {
+		repo = repoFullName[0]
+	}
 	newID := uuid.New().String()
 	_, err = s.db.Pool.Exec(ctx,
-		`INSERT INTO contexts (id, branch, org_id, commit_sha, installed_packages, previous_failures, attempted_fixes, patterns, global_configs, base_os, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-		 ON CONFLICT (org_id, branch) DO NOTHING`,
-		newID, newBranch, orgID, parentCtx.CommitSHA,
+		`INSERT INTO contexts (id, branch, org_id, repo_full_name, commit_sha, installed_packages, previous_failures, attempted_fixes, patterns, global_configs, base_os, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+		 ON CONFLICT (org_id, repo_full_name, branch) DO NOTHING`,
+		newID, newBranch, orgID, repo, parentCtx.CommitSHA,
 		parentCtx.InstalledPackages, parentCtx.PreviousFailures, parentCtx.AttemptedFixes,
 		parentCtx.Patterns, parentCtx.GlobalConfigs, parentCtx.BaseOS,
 	)
@@ -296,6 +306,37 @@ func (s *RepoService) autoForkSnapshot(ctx context.Context, orgID, parentBranch,
 	}
 
 	log.Printf("[repo] Auto-forked snapshot: %s → %s (image: %s, org: %s)", parentBranch, newBranch, *imageRef, orgID)
+	return nil
+}
+
+func (s *RepoService) autoForkEnvironment(ctx context.Context, orgID, repoFullName, parentBranch, newBranch string) error {
+	parentEnv, err := s.envService.EnvRepo.GetByOrgRepoAndBranch(ctx, orgID, repoFullName, parentBranch)
+	if err != nil || parentEnv == nil {
+		log.Printf("[repo] No environment found for parent branch %s in repo %s, skipping env fork", parentBranch, repoFullName)
+		return nil
+	}
+
+	var snapshotRef string
+	snap, _ := s.snapshotDB.GetLatestByBranch(ctx, orgID, parentBranch)
+	if snap != nil {
+		snapshotRef = snap.ImageRef
+	}
+
+	newEnv, err := s.envService.CreateEnvironment(ctx, &CreateEnvRequest{
+		Name:          fmt.Sprintf("fork-%s-%s", newBranch, uuid.New().String()[:8]),
+		OrgID:         orgID,
+		Provider:      parentEnv.Provider,
+		Region:        parentEnv.Region,
+		Size:          parentEnv.Size,
+		ContextBranch: newBranch,
+		SnapshotRef:   snapshotRef,
+		RepoFullName:  repoFullName,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create forked environment: %w", err)
+	}
+
+	log.Printf("[repo] Auto-forked environment: %s → %s (env %s, repo %s)", parentBranch, newBranch, newEnv.ID, repoFullName)
 	return nil
 }
 
@@ -448,6 +489,238 @@ func (s *RepoService) handleBranchDelete(ctx context.Context, payload json.RawMe
 		log.Printf("[repo] Branch %s deleted in org %s. Context and snapshots preserved for history.", branch, orgID)
 	}
 
+	return nil
+}
+
+type pullRequestEvent struct {
+	Action      string `json:"action"`
+	PullRequest struct {
+		Merged bool   `json:"merged"`
+		Head   struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	} `json:"pull_request"`
+	Repository struct {
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
+	} `json:"repository"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+func (s *RepoService) handlePullRequest(ctx context.Context, payload json.RawMessage) error {
+	var event pullRequestEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return fmt.Errorf("failed to parse pull_request event: %w", err)
+	}
+
+	if event.Action != "closed" || !event.PullRequest.Merged {
+		return nil
+	}
+
+	headBranch := event.PullRequest.Head.Ref
+	baseBranch := event.PullRequest.Base.Ref
+	repoFullName := event.Repository.FullName
+	installationID := event.Installation.ID
+
+	log.Printf("[repo] PR merged: %s → %s in %s", headBranch, baseBranch, repoFullName)
+
+	rows, err := s.db.Pool.Query(ctx,
+		`SELECT org_id FROM repo_connections WHERE repo_full_name = $1 AND (installation_id = $2 OR installation_id = 0)`,
+		repoFullName, installationID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to query repo connections: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			continue
+		}
+
+		log.Printf("[repo] Processing PR merge cleanup for org %s: %s → %s", orgID, headBranch, baseBranch)
+
+		if err := s.collapseContextOnMerge(ctx, orgID, repoFullName, headBranch, baseBranch); err != nil {
+			log.Printf("[repo] Context collapse failed for %s → %s: %v", headBranch, baseBranch, err)
+		}
+
+		if err := s.cleanupBranchResources(ctx, orgID, repoFullName, headBranch); err != nil {
+			log.Printf("[repo] Branch cleanup failed for %s: %v", headBranch, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *RepoService) collapseContextOnMerge(ctx context.Context, orgID, repoFullName, headBranch, baseBranch string) error {
+	var headCtx struct {
+		InstalledPackages json.RawMessage
+		PreviousFailures  json.RawMessage
+		AttemptedFixes    json.RawMessage
+		Patterns          json.RawMessage
+		GlobalConfigs     json.RawMessage
+	}
+	err := s.db.Pool.QueryRow(ctx,
+		`SELECT installed_packages, previous_failures, attempted_fixes, patterns, global_configs
+		 FROM contexts WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3`,
+		orgID, repoFullName, headBranch,
+	).Scan(&headCtx.InstalledPackages, &headCtx.PreviousFailures, &headCtx.AttemptedFixes,
+		&headCtx.Patterns, &headCtx.GlobalConfigs)
+	if err != nil {
+		log.Printf("[collapse] No context found for merged branch %s, skipping collapse", headBranch)
+		return nil
+	}
+
+	var basePackages, baseFailures, baseFixes []json.RawMessage
+	var basePatterns, baseConfigs map[string]interface{}
+
+	var basePkgJSON, baseFailJSON, baseFixJSON, basePatJSON, baseCfgJSON json.RawMessage
+	baseErr := s.db.Pool.QueryRow(ctx,
+		`SELECT installed_packages, previous_failures, attempted_fixes, patterns, global_configs
+		 FROM contexts WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3`,
+		orgID, repoFullName, baseBranch,
+	).Scan(&basePkgJSON, &baseFailJSON, &baseFixJSON, &basePatJSON, &baseCfgJSON)
+
+	if baseErr != nil {
+		log.Printf("[collapse] No base context for %s, creating from head", baseBranch)
+		_, err = s.db.Pool.Exec(ctx,
+			`INSERT INTO contexts (id, branch, org_id, repo_full_name, installed_packages, previous_failures, attempted_fixes, patterns, global_configs, base_os, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ubuntu-24.04', NOW(), NOW())
+			 ON CONFLICT (org_id, repo_full_name, branch) DO UPDATE SET
+			 	installed_packages = EXCLUDED.installed_packages,
+			 	previous_failures = EXCLUDED.previous_failures,
+			 	attempted_fixes = EXCLUDED.attempted_fixes,
+			 	patterns = EXCLUDED.patterns,
+			 	global_configs = EXCLUDED.global_configs,
+			 	updated_at = NOW()`,
+			uuid.New().String(), baseBranch, orgID, repoFullName,
+			headCtx.InstalledPackages, headCtx.PreviousFailures, headCtx.AttemptedFixes,
+			headCtx.Patterns, headCtx.GlobalConfigs,
+		)
+		return err
+	}
+
+	json.Unmarshal(basePkgJSON, &basePackages)
+	json.Unmarshal(baseFailJSON, &baseFailures)
+	json.Unmarshal(baseFixJSON, &baseFixes)
+	json.Unmarshal(basePatJSON, &basePatterns)
+	json.Unmarshal(baseCfgJSON, &baseConfigs)
+
+	var headPackages []json.RawMessage
+	var headPatterns, headConfigs map[string]interface{}
+	json.Unmarshal(headCtx.InstalledPackages, &headPackages)
+	json.Unmarshal(headCtx.Patterns, &headPatterns)
+	json.Unmarshal(headCtx.GlobalConfigs, &headConfigs)
+
+	mergedPackages := mergeJSONArrays(basePkgJSON, headCtx.InstalledPackages)
+	mergedFailures := mergeJSONArrays(baseFailJSON, headCtx.PreviousFailures)
+	mergedFixes := mergeJSONArrays(baseFixJSON, headCtx.AttemptedFixes)
+	mergedPatterns := mergeJSONMaps(basePatJSON, headCtx.Patterns)
+	mergedConfigs := mergeJSONMaps(baseCfgJSON, headCtx.GlobalConfigs)
+
+	_, err = s.db.Pool.Exec(ctx,
+		`UPDATE contexts SET
+			installed_packages = $1,
+			previous_failures = $2,
+			attempted_fixes = $3,
+			patterns = $4,
+			global_configs = $5,
+			updated_at = NOW()
+		 WHERE org_id = $6 AND repo_full_name = $7 AND branch = $8`,
+		mergedPackages, mergedFailures, mergedFixes, mergedPatterns, mergedConfigs,
+		orgID, repoFullName, baseBranch,
+	)
+
+	log.Printf("[collapse] Context merged from %s into %s for repo %s", headBranch, baseBranch, repoFullName)
+	return err
+}
+
+func mergeJSONArrays(base, head json.RawMessage) json.RawMessage {
+	var baseArr, headArr []json.RawMessage
+	json.Unmarshal(base, &baseArr)
+	json.Unmarshal(head, &headArr)
+
+	seen := make(map[string]bool)
+	var merged []json.RawMessage
+	for _, item := range baseArr {
+		key := string(item)
+		if !seen[key] {
+			seen[key] = true
+			merged = append(merged, item)
+		}
+	}
+	for _, item := range headArr {
+		key := string(item)
+		if !seen[key] {
+			seen[key] = true
+			merged = append(merged, item)
+		}
+	}
+
+	result, _ := json.Marshal(merged)
+	if result == nil {
+		return json.RawMessage("[]")
+	}
+	return result
+}
+
+func mergeJSONMaps(base, head json.RawMessage) json.RawMessage {
+	var baseMap, headMap map[string]interface{}
+	json.Unmarshal(base, &baseMap)
+	json.Unmarshal(head, &headMap)
+
+	if baseMap == nil {
+		baseMap = make(map[string]interface{})
+	}
+	for k, v := range headMap {
+		baseMap[k] = v
+	}
+
+	result, _ := json.Marshal(baseMap)
+	if result == nil {
+		return json.RawMessage("{}")
+	}
+	return result
+}
+
+func (s *RepoService) cleanupBranchResources(ctx context.Context, orgID, repoFullName, branch string) error {
+	branchEnv, _ := s.envService.EnvRepo.GetByOrgRepoAndBranch(ctx, orgID, repoFullName, branch)
+	if branchEnv != nil {
+		if err := s.envService.DestroyEnvironment(ctx, branchEnv.ID, orgID); err != nil {
+			log.Printf("[cleanup] Failed to destroy environment %s for branch %s: %v", branchEnv.ID, branch, err)
+		} else {
+			log.Printf("[cleanup] Destroyed environment %s for merged branch %s", branchEnv.ID, branch)
+		}
+	}
+
+	_, err := s.db.Pool.Exec(ctx,
+		`DELETE FROM contexts WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3`,
+		orgID, repoFullName, branch)
+	if err != nil {
+		log.Printf("[cleanup] Failed to delete context for branch %s: %v", branch, err)
+	}
+
+	_, err = s.db.Pool.Exec(ctx,
+		`DELETE FROM context_objects WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3`,
+		orgID, repoFullName, branch)
+	if err != nil {
+		log.Printf("[cleanup] Failed to delete context objects for branch %s: %v", branch, err)
+	}
+
+	_, err = s.db.Pool.Exec(ctx,
+		`DELETE FROM context_events WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3`,
+		orgID, repoFullName, branch)
+	if err != nil {
+		log.Printf("[cleanup] Failed to delete context events for branch %s: %v", branch, err)
+	}
+
+	log.Printf("[cleanup] Cleaned up resources for merged branch %s in repo %s", branch, repoFullName)
 	return nil
 }
 
@@ -630,6 +903,37 @@ func (ss *SnapshotStore) Save(ctx context.Context, snapshot *models.Snapshot) er
 		snapshot.ParentSnapshotID, snapshot.CommitSHA, snapshot.CreatedAt,
 	)
 	return err
+}
+
+func (ss *SnapshotStore) ListByOrg(ctx context.Context, orgID string) ([]*models.Snapshot, error) {
+	query := `
+		SELECT id, org_id, branch,
+			COALESCE(environment_id, ''), snapshot_type, COALESCE(image_ref, ''), size_bytes,
+			COALESCE(parent_snapshot_id, ''), COALESCE(commit_sha, ''), created_at
+		FROM snapshots
+		WHERE org_id = $1
+		ORDER BY created_at DESC
+		LIMIT 100
+	`
+	rows, err := ss.db.Pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var snapshots []*models.Snapshot
+	for rows.Next() {
+		var snap models.Snapshot
+		if err := rows.Scan(
+			&snap.ID, &snap.OrgID, &snap.Branch, &snap.EnvironmentID,
+			&snap.SnapshotType, &snap.ImageRef, &snap.SizeBytes,
+			&snap.ParentSnapshotID, &snap.CommitSHA, &snap.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, &snap)
+	}
+	return snapshots, rows.Err()
 }
 
 func (ss *SnapshotStore) ListByOrgAndBranch(ctx context.Context, orgID, branch string) ([]*models.Snapshot, error) {

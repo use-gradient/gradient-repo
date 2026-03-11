@@ -41,13 +41,13 @@ func (s *EventStore) Publish(ctx context.Context, event *Event) (int64, error) {
 
 	query := `
 		INSERT INTO context_events (
-			id, schema_version, event_type, org_id, branch, env_id, source,
+			id, schema_version, event_type, org_id, repo_full_name, branch, env_id, source,
 			data, idempotency_key, timestamp, causal_id, parent_id,
 			created_at, expires_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12,
-			$13, $14
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13,
+			$14, $15
 		)
 		ON CONFLICT (org_id, branch, idempotency_key) DO NOTHING
 		RETURNING sequence
@@ -64,6 +64,7 @@ func (s *EventStore) Publish(ctx context.Context, event *Event) (int64, error) {
 		event.SchemaVersion,
 		string(event.Type),
 		event.OrgID,
+		event.RepoFullName,
 		event.Branch,
 		event.EnvID,
 		event.Source,
@@ -109,6 +110,12 @@ func (s *EventStore) Query(ctx context.Context, filter EventFilter) (*EventBatch
 	conditions = append(conditions, fmt.Sprintf("org_id = $%d", argIdx))
 	args = append(args, filter.OrgID)
 	argIdx++
+
+	if filter.RepoFullName != "" {
+		conditions = append(conditions, fmt.Sprintf("repo_full_name = $%d", argIdx))
+		args = append(args, filter.RepoFullName)
+		argIdx++
+	}
 
 	if filter.Branch != "" {
 		conditions = append(conditions, fmt.Sprintf("branch = $%d", argIdx))
@@ -165,7 +172,7 @@ func (s *EventStore) Query(ctx context.Context, filter EventFilter) (*EventBatch
 
 	// Fetch limit+1 to detect hasMore
 	query := fmt.Sprintf(`
-		SELECT id, schema_version, event_type, org_id, branch, env_id, source,
+		SELECT id, schema_version, event_type, org_id, COALESCE(repo_full_name, ''), branch, env_id, source,
 		       data, idempotency_key, timestamp, sequence, causal_id, parent_id,
 		       created_at, expires_at, acked
 		FROM context_events
@@ -214,7 +221,7 @@ func (s *EventStore) Query(ctx context.Context, filter EventFilter) (*EventBatch
 // GetByID retrieves a single event by its ID.
 func (s *EventStore) GetByID(ctx context.Context, id string) (*Event, error) {
 	query := `
-		SELECT id, schema_version, event_type, org_id, branch, env_id, source,
+		SELECT id, schema_version, event_type, org_id, COALESCE(repo_full_name, ''), branch, env_id, source,
 		       data, idempotency_key, timestamp, sequence, causal_id, parent_id,
 		       created_at, expires_at, acked
 		FROM context_events
@@ -337,6 +344,7 @@ func scanEvent(rows scannable) (*Event, error) {
 		&e.SchemaVersion,
 		&eventType,
 		&e.OrgID,
+		&e.RepoFullName,
 		&e.Branch,
 		&e.EnvID,
 		&e.Source,
@@ -374,6 +382,16 @@ func scanEvent(rows scannable) (*Event, error) {
 
 func scanEventRow(row scannable) (*Event, error) {
 	return scanEvent(row)
+}
+
+// DeleteByRepoBranch removes all events for a specific repo+branch.
+func (s *EventStore) DeleteByRepoBranch(ctx context.Context, orgID, repoFullName, branch string) (int64, error) {
+	query := `DELETE FROM context_events WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3`
+	tag, err := s.db.Pool.Exec(ctx, query, orgID, repoFullName, branch)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete events for branch: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func nilIfEmpty(s string) *string {

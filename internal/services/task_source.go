@@ -54,12 +54,16 @@ func NewLinearTaskSource(linear *LinearService) *LinearTaskSource {
 func (s *LinearTaskSource) Name() string { return "linear" }
 
 func (s *LinearTaskSource) ParseEvent(payload []byte) (*IncomingTask, error) {
-	_, data, err := s.linear.ParseWebhookEvent(payload)
+	action, data, err := s.linear.ParseWebhookEvent(payload)
 	if err != nil {
 		return nil, err
 	}
 	if data == nil {
 		return nil, fmt.Errorf("missing event data")
+	}
+	// Only create tasks for new issues, not updates/removes/state changes
+	if action != "create" {
+		return nil, nil
 	}
 
 	task := &IncomingTask{

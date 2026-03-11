@@ -93,8 +93,9 @@ type Event struct {
 	Type          EventType `json:"type"`           // Event type (enum)
 
 	// Scoping
-	OrgID  string `json:"org_id"` // Organization ID
-	Branch string `json:"branch"` // Git branch this event belongs to
+	OrgID         string `json:"org_id"` // Organization ID
+	RepoFullName  string `json:"repo_full_name,omitempty"`
+	Branch        string `json:"branch"` // Git branch this event belongs to
 	EnvID  string `json:"env_id"` // Environment that produced this event
 	Source string `json:"source"` // Source identifier (e.g. "agent", "api", "cli")
 
@@ -440,9 +441,10 @@ func ComputeIdempotencyKey(eventType EventType, envID string, data []byte) strin
 
 // EventFilter is used to query events from the store.
 type EventFilter struct {
-	OrgID  string      `json:"org_id"`
-	Branch string      `json:"branch,omitempty"`
-	EnvID  string      `json:"env_id,omitempty"`
+	OrgID        string      `json:"org_id"`
+	RepoFullName string      `json:"repo_full_name,omitempty"`
+	Branch       string      `json:"branch,omitempty"`
+	EnvID        string      `json:"env_id,omitempty"`
 	Types  []EventType `json:"types,omitempty"`
 	Since  time.Time   `json:"since,omitempty"`
 	Until  time.Time   `json:"until,omitempty"`

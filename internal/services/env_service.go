@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -14,9 +15,10 @@ import (
 
 // EnvServiceConfig holds configuration that gets passed to providers when creating environments.
 type EnvServiceConfig struct {
-	APIURL        string // Gradient API URL for agent callbacks
-	NATSUrl       string // NATS URL for Live Context Mesh
-	NATSAuthToken string // NATS auth token
+	APIURL          string // Gradient API URL for agent callbacks
+	NATSUrl         string // NATS URL for Live Context Mesh
+	NATSAuthToken   string // NATS auth token
+	DefaultProvider string // Default cloud provider ("aws" or "hetzner"), from DEV_ENV_SRC
 }
 
 type EnvService struct {
@@ -77,6 +79,14 @@ func (s *EnvService) RegisterProvider(name string, provider env.Provider) {
 	s.providers[name] = provider
 }
 
+// GetDefaultProvider returns the configured default provider name.
+func (s *EnvService) GetDefaultProvider() string {
+	if s.config.DefaultProvider != "" {
+		return s.config.DefaultProvider
+	}
+	return "aws"
+}
+
 // AvailableProviders returns the names of all configured providers.
 func (s *EnvService) AvailableProviders() []string {
 	names := make([]string, 0, len(s.providers))
@@ -94,6 +104,7 @@ type CreateEnvRequest struct {
 	Size          string
 	Config        map[string]interface{}
 	ContextBranch string
+	RepoFullName  string
 	SnapshotRef   string // If restoring from a snapshot image
 }
 
@@ -102,11 +113,12 @@ func (s *EnvService) CreateEnvironment(ctx context.Context, req *CreateEnvReques
 		return nil, fmt.Errorf("name is required")
 	}
 	if req.Provider == "" {
-		// Default to first available provider (hetzner preferred)
-		if _, ok := s.providers["hetzner"]; ok {
-			req.Provider = "hetzner"
-		} else {
-			// Use whatever is available
+		if s.config.DefaultProvider != "" {
+			if _, ok := s.providers[s.config.DefaultProvider]; ok {
+				req.Provider = s.config.DefaultProvider
+			}
+		}
+		if req.Provider == "" {
 			for name := range s.providers {
 				req.Provider = name
 				break
@@ -140,6 +152,7 @@ func (s *EnvService) CreateEnvironment(ctx context.Context, req *CreateEnvReques
 		Resources:     resources,
 		Config:        req.Config,
 		ContextBranch: req.ContextBranch,
+		RepoFullName:  req.RepoFullName,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
@@ -419,6 +432,143 @@ func (s *EnvService) SnapshotEnvironment(ctx context.Context, envID, orgID, tag 
 	}
 
 	return imageRef, nil
+}
+
+// SleepEnvironment snapshots the env, stops the VM, and sets status to "sleeping".
+func (s *EnvService) SleepEnvironment(ctx context.Context, envID, orgID string) error {
+	existingEnv, err := s.EnvRepo.GetByID(ctx, envID)
+	if err != nil {
+		return fmt.Errorf("environment not found: %w", err)
+	}
+	if existingEnv.OrgID != orgID {
+		return fmt.Errorf("environment does not belong to this org")
+	}
+	if existingEnv.Status != "running" {
+		return fmt.Errorf("can only sleep a running environment (status: %s)", existingEnv.Status)
+	}
+
+	tag := fmt.Sprintf("sleep-%s-%d", existingEnv.Name, time.Now().Unix())
+	if existingEnv.ClusterName != "" {
+		provider, pErr := s.getProvider(existingEnv.Provider)
+		if pErr == nil {
+			if snapshotter, ok := provider.(env.Snapshotter); ok {
+				if imageRef, sErr := snapshotter.SnapshotEnvironment(ctx, existingEnv.ClusterName, tag); sErr == nil {
+					log.Printf("[sleep] Snapshot taken for env %s: %s", envID, imageRef)
+				}
+			}
+			if err := provider.DestroyEnvironment(ctx, existingEnv.ClusterName); err != nil {
+				log.Printf("[sleep] Failed to stop VM for env %s: %v", envID, err)
+			}
+		}
+	}
+
+	existingEnv.Status = "sleeping"
+	existingEnv.UpdatedAt = time.Now()
+	return s.EnvRepo.Update(ctx, existingEnv)
+}
+
+// WakeEnvironment restores VM from snapshot, waits for ready, and sets status to "running".
+func (s *EnvService) WakeEnvironment(ctx context.Context, envID, orgID string) error {
+	existingEnv, err := s.EnvRepo.GetByID(ctx, envID)
+	if err != nil {
+		return fmt.Errorf("environment not found: %w", err)
+	}
+	if existingEnv.OrgID != orgID {
+		return fmt.Errorf("environment does not belong to this org")
+	}
+	if existingEnv.Status != "sleeping" {
+		return fmt.Errorf("can only wake a sleeping environment (status: %s)", existingEnv.Status)
+	}
+
+	existingEnv.Status = "creating"
+	existingEnv.UpdatedAt = time.Now()
+	if err := s.EnvRepo.Update(ctx, existingEnv); err != nil {
+		return err
+	}
+
+	provider, err := s.getProvider(existingEnv.Provider)
+	if err != nil {
+		return err
+	}
+
+	regURL, regUser, regPass := s.resolveRegistry(ctx, existingEnv.OrgID)
+
+	providerCfg := env.ProviderConfig{
+		Name:          existingEnv.Name,
+		Region:        existingEnv.Region,
+		Size:          existingEnv.Size,
+		Resources:     existingEnv.Resources,
+		RegistryURL:   regURL,
+		RegistryUser:  regUser,
+		RegistryPass:  regPass,
+		EnvID:         envID,
+		OrgID:         existingEnv.OrgID,
+		Branch:        existingEnv.ContextBranch,
+		APIURL:        s.config.APIURL,
+		NATSUrl:       s.config.NATSUrl,
+		NATSAuthToken: s.config.NATSAuthToken,
+	}
+
+	go func() {
+		bgCtx := context.Background()
+		providerRef, createErr := provider.CreateEnvironment(bgCtx, &providerCfg)
+		if createErr != nil {
+			log.Printf("[wake] Failed to wake environment %s: %v", envID, createErr)
+			s.setEnvStatus(bgCtx, envID, "sleeping", "")
+			return
+		}
+		var ip string
+		if netInfo, ok := env.AsNetworkInfo(provider); ok {
+			ip, _ = netInfo.GetServerIP(bgCtx, providerRef)
+		}
+		s.setEnvStatusFull(bgCtx, envID, "running", providerRef, ip, 0)
+		log.Printf("[wake] Environment %s woken up on %s", envID, providerRef)
+	}()
+
+	return nil
+}
+
+func (s *EnvService) GetByOrgRepoAndBranch(ctx context.Context, orgID, repoFullName, branch string) (*models.Environment, error) {
+	return s.EnvRepo.GetByOrgRepoAndBranch(ctx, orgID, repoFullName, branch)
+}
+
+func (s *EnvService) ListAllRunning(ctx context.Context) ([]*models.Environment, error) {
+	query := `
+		SELECT id, name, org_id, COALESCE(repo_full_name, ''), provider, region, size, COALESCE(cluster_name, ''), COALESCE(ip_address, ''),
+		       status, resources, config, context_branch, created_at, updated_at, destroyed_at
+		FROM environments
+		WHERE status = 'running'
+		ORDER BY updated_at ASC
+	`
+	rows, err := s.EnvRepo.DB().Pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var envs []*models.Environment
+	for rows.Next() {
+		var e models.Environment
+		var destroyedAt *time.Time
+		var resourcesJSON, configJSON []byte
+		err := rows.Scan(
+			&e.ID, &e.Name, &e.OrgID, &e.RepoFullName, &e.Provider, &e.Region, &e.Size, &e.ClusterName, &e.IPAddress,
+			&e.Status, &resourcesJSON, &configJSON, &e.ContextBranch, &e.CreatedAt, &e.UpdatedAt, &destroyedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		e.DestroyedAt = destroyedAt
+		json.Unmarshal(resourcesJSON, &e.Resources)
+		if configJSON != nil {
+			json.Unmarshal(configJSON, &e.Config)
+		}
+		envs = append(envs, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return envs, nil
 }
 
 func (s *EnvService) GetEnvironment(ctx context.Context, envID string) (*models.Environment, error) {

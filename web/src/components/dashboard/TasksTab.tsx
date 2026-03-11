@@ -1,13 +1,14 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Markdown from 'react-markdown'
 import { api } from '@/api/client'
-import { useFetch, useMutation } from '@/hooks/useAPI'
+import { useFetch, usePolling } from '@/hooks/useAPI'
 import { cn, timeAgo } from '@/lib/utils'
 import {
-  Button, Card, Badge, EmptyState, Modal, Input, Skeleton, useToast, Tabs,
+  Button, Card, Badge, EmptyState, Modal, Skeleton, Tabs,
 } from '@/components/ui'
 import {
-  Bot, Plus, Play, RefreshCw, XCircle, RotateCcw, Clock,
+  Bot, RefreshCw, XCircle, Clock,
   CheckCircle2, AlertTriangle, Loader2, GitBranch, ExternalLink,
   ChevronRight, BarChart3, FileText, Plug, Key,
 } from 'lucide-react'
@@ -67,69 +68,8 @@ function SetupRequired({ readiness }: { readiness: { claude_configured: boolean;
   )
 }
 
-/* ─── Create Task Modal ─── */
-function CreateTaskModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [branch, setBranch] = useState('')
-  const { toast } = useToast()
-
-  const { mutate, loading, error } = useMutation(
-    (token: string, orgId: string, body: any) => api.tasks.create(token, orgId, body)
-  )
-
-  const handleCreate = async () => {
-    const result = await mutate({ title, description, branch: branch || undefined })
-    if (result) {
-      toast('success', `Task "${title}" created`)
-      setTitle(''); setDescription(''); setBranch('')
-      onCreated()
-      onClose()
-    }
-  }
-
-  return (
-    <Modal open={open} onClose={onClose} title="Create Task" description="Describe what you need the AI agent to do" size="md" footer={
-      <div className="flex gap-2">
-        <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={handleCreate} loading={loading} disabled={!title}>
-          <Bot className="w-3.5 h-3.5" /> Create Task
-        </Button>
-      </div>
-    }>
-      <div className="space-y-4">
-        <Input
-          label="Title"
-          placeholder="e.g. Add dark mode toggle to settings page"
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          autoFocus
-        />
-        <div>
-          <label className="text-sm font-medium text-foreground mb-1.5 block">Description</label>
-          <textarea
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Detailed instructions, acceptance criteria, links to designs..."
-            className="w-full bg-card border border-input rounded-md px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-1 focus:ring-ring min-h-[100px] resize-y"
-          />
-        </div>
-        <Input
-          label="Branch (optional)"
-          placeholder="feature/dark-mode"
-          value={branch}
-          onChange={e => setBranch(e.target.value)}
-          mono
-        />
-        {error && <p className="text-xs text-destructive">{error}</p>}
-      </div>
-    </Modal>
-  )
-}
-
 /* ─── Task Detail Modal ─── */
-function TaskDetailModal({ task, open, onClose, onAction }: { task: any; open: boolean; onClose: () => void; onAction: () => void }) {
-  const { toast } = useToast()
+function TaskDetailModal({ task, open, onClose }: { task: any; open: boolean; onClose: () => void }) {
   const { data: logs, loading: logsLoading } = useFetch(
     useCallback((token: string, orgId: string) =>
       task?.id ? api.tasks.logs(token, orgId, task.id) : Promise.resolve([]),
@@ -137,51 +77,13 @@ function TaskDetailModal({ task, open, onClose, onAction }: { task: any; open: b
     [task?.id]
   )
 
-  const { mutate: startTask, loading: starting } = useMutation(
-    (token: string, orgId: string, id: string) => api.tasks.start(token, orgId, id)
-  )
-  const { mutate: cancelTask, loading: cancelling } = useMutation(
-    (token: string, orgId: string, id: string) => api.tasks.cancel(token, orgId, id)
-  )
-  const { mutate: retryTask, loading: retrying } = useMutation(
-    (token: string, orgId: string, id: string) => api.tasks.retry(token, orgId, id)
-  )
-
   if (!task) return null
 
   const status = STATUS_MAP[task.status] || STATUS_MAP.pending
   const StatusIcon = status.icon
 
-  const handleStart = async () => {
-    await startTask(task.id)
-    toast('success', 'Task started')
-    onAction()
-  }
-  const handleCancel = async () => {
-    await cancelTask(task.id)
-    toast('success', 'Task cancelled')
-    onAction()
-  }
-  const handleRetry = async () => {
-    await retryTask(task.id)
-    toast('success', 'Task retried')
-    onAction()
-  }
-
   return (
-    <Modal open={open} onClose={onClose} title={task.title} size="lg" footer={
-      <div className="flex gap-2">
-        {(task.status === 'pending') && (
-          <Button onClick={handleStart} loading={starting}><Play className="w-3.5 h-3.5" /> Start</Button>
-        )}
-        {(task.status === 'pending' || task.status === 'running' || task.status === 'queued') && (
-          <Button variant="destructive" onClick={handleCancel} loading={cancelling}><XCircle className="w-3.5 h-3.5" /> Cancel</Button>
-        )}
-        {(task.status === 'failed' || task.status === 'cancelled') && (
-          <Button onClick={handleRetry} loading={retrying}><RotateCcw className="w-3.5 h-3.5" /> Retry</Button>
-        )}
-      </div>
-    }>
+    <Modal open={open} onClose={onClose} title={task.title} size="lg">
       <div className="space-y-4">
         {/* Status + meta */}
         <div className="flex items-center gap-3 flex-wrap">
@@ -200,8 +102,25 @@ function TaskDetailModal({ task, open, onClose, onAction }: { task: any; open: b
 
         {/* Description */}
         {task.description && (
-          <div className="text-sm text-muted-foreground whitespace-pre-wrap bg-secondary/50 rounded-md p-3">
-            {task.description}
+          <div className="text-sm text-muted-foreground bg-secondary/50 rounded-md p-3 max-h-64 overflow-y-auto">
+            <Markdown
+              components={{
+                h1: ({ children }) => <h1 className="text-base font-bold text-foreground mt-2 mb-1">{children}</h1>,
+                h2: ({ children }) => <h2 className="text-sm font-semibold text-foreground mt-2 mb-1">{children}</h2>,
+                h3: ({ children }) => <h3 className="text-sm font-medium text-foreground mt-1.5 mb-0.5">{children}</h3>,
+                p: ({ children }) => <p className="mb-1.5 leading-relaxed">{children}</p>,
+                ul: ({ children }) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children}</ul>,
+                ol: ({ children }) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children}</ol>,
+                li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                code: ({ children, className }) => className
+                  ? <code className="block bg-background/80 rounded p-2 text-xs font-mono overflow-x-auto my-1">{children}</code>
+                  : <code className="bg-background/80 rounded px-1 py-0.5 text-xs font-mono">{children}</code>,
+                strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
+                a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{children}</a>,
+              }}
+            >
+              {task.description}
+            </Markdown>
           </div>
         )}
 
@@ -209,7 +128,9 @@ function TaskDetailModal({ task, open, onClose, onAction }: { task: any; open: b
         {task.output_summary && (
           <Card className="p-3">
             <p className="text-xs font-medium text-foreground mb-1">Output Summary</p>
-            <p className="text-sm text-muted-foreground whitespace-pre-wrap">{task.output_summary}</p>
+            <div className="text-sm text-muted-foreground max-h-48 overflow-y-auto">
+              <Markdown>{task.output_summary}</Markdown>
+            </div>
           </Card>
         )}
 
@@ -271,12 +192,9 @@ function TaskDetailModal({ task, open, onClose, onAction }: { task: any; open: b
 /* ─── Main Tasks Tab ─── */
 export default function TasksTab() {
   const [activeTab, setActiveTab] = useState('tasks')
-  const [showCreate, setShowCreate] = useState(false)
   const [selectedTask, setSelectedTask] = useState<any>(null)
   const [statusFilter, setStatusFilter] = useState('')
-  const { toast } = useToast()
 
-  // ── Readiness check — gates the entire tab ──
   const { data: readiness, loading: readinessLoading } = useFetch(
     useCallback((token: string, orgId: string) => api.tasks.readiness(token, orgId), [])
   )
@@ -290,18 +208,22 @@ export default function TasksTab() {
     [statusFilter]
   )
 
-  const { data: stats } = useFetch(
+  const { data: stats, refetch: refetchStats } = useFetch(
     useCallback((token: string, orgId: string) => api.tasks.stats(token, orgId), [])
   )
 
+  const hasActiveTasks = (stats?.running ?? 0) > 0 || (tasks || []).some(
+    (t: any) => t.status === 'running' || t.status === 'pending' || t.status === 'queued'
+  )
+  usePolling(() => { refetch(); refetchStats() }, 5000, hasActiveTasks)
+  usePolling(() => { refetch(); refetchStats() }, 30000, !hasActiveTasks)
+
   const isReady = readiness?.ready === true
 
-  // While loading readiness, show skeleton
   if (readinessLoading) {
     return <div className="space-y-4"><Skeleton className="h-10 w-full" /><Skeleton className="h-40 w-full" /></div>
   }
 
-  // If not ready, show the setup CTA — don't show tasks UI at all
   if (!isReady && readiness) {
     return <SetupRequired readiness={readiness} />
   }
@@ -322,7 +244,6 @@ export default function TasksTab() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <p className="text-xs text-muted-foreground">AI agent tasks powered by Claude Code</p>
-              {/* Status filter chips */}
               <div className="flex gap-1 ml-2">
                 {['', 'running', 'pending', 'complete', 'failed'].map(s => (
                   <button
@@ -338,12 +259,9 @@ export default function TasksTab() {
                 ))}
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={refetch}><RefreshCw className="w-3.5 h-3.5" /></Button>
-              <Button size="sm" onClick={() => setShowCreate(true)}>
-                <Plus className="w-3.5 h-3.5" /> New Task
-              </Button>
-            </div>
+            <button onClick={refetch} className="p-2 text-muted-foreground hover:text-foreground transition-colors">
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
           </div>
 
           {tasksLoading ? (
@@ -352,8 +270,7 @@ export default function TasksTab() {
             <EmptyState
               icon={Bot}
               title={statusFilter ? `No ${statusFilter} tasks` : 'No tasks yet'}
-              description="Create a task to have the AI agent work on it. Tasks can come from Linear issues or be created manually."
-              action={!statusFilter && <Button size="sm" onClick={() => setShowCreate(true)}><Plus className="w-3.5 h-3.5" /> Create Task</Button>}
+              description="Tasks are created automatically from Linear issues. Connect Linear in Integrations to get started."
             />
           ) : (
             <div className="space-y-2">
@@ -424,8 +341,7 @@ export default function TasksTab() {
         </div>
       )}
 
-      <CreateTaskModal open={showCreate} onClose={() => setShowCreate(false)} onCreated={refetch} />
-      <TaskDetailModal task={selectedTask} open={!!selectedTask} onClose={() => setSelectedTask(null)} onAction={() => { refetch(); setSelectedTask(null) }} />
+      <TaskDetailModal task={selectedTask} open={!!selectedTask} onClose={() => setSelectedTask(null)} />
     </div>
   )
 }

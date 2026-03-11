@@ -86,19 +86,32 @@ func (s *ClaudeService) GetConfig(ctx context.Context, orgID, userID string) (*m
 	var toolsJSON string
 	var nullUserID *string
 
-	query := `
-		SELECT id, org_id, user_id, anthropic_api_key, model, max_turns,
-			allowed_tools, max_cost_per_task, max_tokens_per_task, created_at, updated_at
-		FROM claude_configs
-		WHERE org_id = $1 AND (user_id = $2 OR user_id IS NULL)
-		ORDER BY user_id DESC NULLS LAST LIMIT 1`
+	var query string
+	var args []interface{}
 
-	var userIDPtr *string
 	if userID != "" {
-		userIDPtr = &userID
+		query = `
+			SELECT id, org_id, user_id, anthropic_api_key, COALESCE(model, 'claude-sonnet-4-20250514'),
+				COALESCE(max_turns, 50), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
+				COALESCE(max_cost_per_task, 0), COALESCE(max_tokens_per_task, 100000),
+				created_at, updated_at
+			FROM claude_configs
+			WHERE org_id = $1 AND (user_id = $2 OR user_id IS NULL)
+			ORDER BY user_id DESC NULLS LAST LIMIT 1`
+		args = []interface{}{orgID, userID}
+	} else {
+		query = `
+			SELECT id, org_id, user_id, anthropic_api_key, COALESCE(model, 'claude-sonnet-4-20250514'),
+				COALESCE(max_turns, 50), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
+				COALESCE(max_cost_per_task, 0), COALESCE(max_tokens_per_task, 100000),
+				created_at, updated_at
+			FROM claude_configs
+			WHERE org_id = $1
+			ORDER BY user_id NULLS LAST LIMIT 1`
+		args = []interface{}{orgID}
 	}
 
-	err := s.db.Pool.QueryRow(ctx, query, orgID, userIDPtr).Scan(
+	err := s.db.Pool.QueryRow(ctx, query, args...).Scan(
 		&cfg.ID, &cfg.OrgID, &nullUserID, &cfg.AnthropicAPIKey, &cfg.Model, &cfg.MaxTurns,
 		&toolsJSON, &cfg.MaxCostPerTask, &cfg.MaxTokensPerTask, &cfg.CreatedAt, &cfg.UpdatedAt,
 	)

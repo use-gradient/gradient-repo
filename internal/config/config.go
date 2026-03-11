@@ -96,6 +96,9 @@ type Config struct {
 	WarmPoolMaxSize     int    // Hard cap on total warm servers (default: 3, max: 8)
 	WarmPoolIdleTimeout string // Destroy warm servers idle longer than this (default: "30m")
 
+	// Default environment provider ("aws" or "hetzner")
+	DevEnvSrc string
+
 	// MCP
 	MCPServerPort string
 
@@ -160,6 +163,7 @@ func Load() *Config {
 		WarmPoolDefaultSize:    getEnvInt("WARM_POOL_DEFAULT_SIZE", 3),
 		WarmPoolMaxSize:        clampInt(getEnvInt("WARM_POOL_MAX_SIZE", 3), 0, 8),
 		WarmPoolIdleTimeout:    getEnv("WARM_POOL_IDLE_TIMEOUT", "30m"),
+		DevEnvSrc:              getEnv("DEV_ENV_SRC", "aws"),
 		MCPServerPort:          getEnv("MCP_SERVER_PORT", "8081"),
 		LogLevel:               getEnv("LOG_LEVEL", "info"),
 	}

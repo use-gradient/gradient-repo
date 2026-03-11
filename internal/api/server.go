@@ -55,9 +55,10 @@ type Server struct {
 	taskExecutor  *services.TaskExecutorService
 
 	// Agent-Native VCS
-	sessionService *services.SessionService
-	mergeService   *services.MergeService
-	taskClassifier *services.TaskClassifier
+	sessionService     *services.SessionService
+	mergeService       *services.MergeService
+	taskClassifier     *services.TaskClassifier
+	eventPropagation   *services.EventPropagationService
 
 	// Rate limiting
 	rateLimiter *RateLimiter
@@ -116,9 +117,10 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	}
 
 	envService := services.NewEnvService(envRepo, hetznerProvider, awsProvider, services.EnvServiceConfig{
-		APIURL:        cfg.APIURL,
-		NATSUrl:       cfg.NATSUrl,
-		NATSAuthToken: cfg.NATSAuthToken,
+		APIURL:          cfg.APIURL,
+		NATSUrl:         cfg.NATSUrl,
+		NATSAuthToken:   cfg.NATSAuthToken,
+		DefaultProvider: cfg.DevEnvSrc,
 	})
 	contextStore := gradctx.NewStore(database)
 	contextService := services.NewContextService(contextStore)
@@ -202,18 +204,48 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	fmt.Println("[init] ✓ Claude Code service initialized")
 
 	// Task service (orchestrator)
-	taskService := services.NewTaskService(database, envService, claudeService, linearService, contextService)
+	taskService := services.NewTaskService(database, envService, claudeService, linearService, contextService, cfg.HetznerLocation)
 	fmt.Println("[init] ✓ Agent task service initialized")
 
 	taskExecutor := services.NewTaskExecutorService(
-		database, envService, claudeService, taskService, githubService, linearService, meshPublisher, snapshotStore,
+		database, envService, claudeService, taskService, githubService, linearService, contextService, meshPublisher, snapshotStore,
 	)
 
 	// Agent-Native VCS services
 	sessionService := services.NewSessionService(database)
 	mergeService := services.NewMergeService(database, sessionService, envService, meshPublisher)
 	taskClassifier := services.NewTaskClassifier(claudeService)
+	eventPropagation := services.NewEventPropagationService(database, sessionService, taskExecutor, meshPublisher, eventBus)
 	fmt.Println("[init] ✓ Agent-Native VCS services initialized")
+
+	// Start event propagation listener for all known orgs
+	if eventBus != nil {
+		go func() {
+			rows, err := database.Pool.Query(context.Background(),
+				`SELECT DISTINCT org_id FROM linear_connections WHERE status = 'active'
+				 UNION SELECT DISTINCT org_id FROM github_connections`)
+			if err != nil {
+				fmt.Printf("[init] Warning: could not query orgs for event propagation: %v\n", err)
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var orgID string
+				if rows.Scan(&orgID) == nil && orgID != "" {
+					if err := eventPropagation.StartListening(context.Background(), orgID); err != nil {
+						fmt.Printf("[init] Warning: event propagation for org %s failed: %v\n", orgID, err)
+					} else {
+						fmt.Printf("[init] ✓ Event propagation active for org %s\n", orgID)
+					}
+				}
+			}
+		}()
+	}
+
+	// Idle environment monitor — sleeps repo-scoped envs after 30min of inactivity
+	idleMonitor := services.NewEnvIdleMonitor(envService, 5*time.Minute, 30*time.Minute)
+	idleMonitor.Start()
+	fmt.Println("[init] ✓ Environment idle monitor started (check every 5m, sleep after 30m)")
 
 	// Rate limiter
 	rateLimiter := NewRateLimiter(DefaultRateLimitConfig())
@@ -242,6 +274,7 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		sessionService:   sessionService,
 		mergeService:     mergeService,
 		taskClassifier:   taskClassifier,
+		eventPropagation:  eventPropagation,
 		rateLimiter:      rateLimiter,
 	}
 }
@@ -289,6 +322,9 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	// All other routes require authentication
 	authenticated := r.PathPrefix("/api/v1").Subrouter()
 	authenticated.Use(s.authMiddleware.Authenticate)
+
+	// Providers
+	authenticated.HandleFunc("/providers", s.handleListProviders).Methods("GET")
 
 	// Environments
 	authenticated.HandleFunc("/environments", s.handleCreateEnvironment).Methods("POST")
@@ -580,20 +616,219 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 
 	source := services.NewLinearTaskSource(s.linearService)
 
-	task, err := source.ParseEvent(body)
+	incomingTask, err := source.ParseEvent(body)
 	if err != nil {
-		fmt.Printf("[webhook/linear] failed to parse event: %v\n", err)
+		fmt.Printf("[webhook/linear] ignoring event: %v\n", err)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
 
-	if task == nil {
+	if incomingTask == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
 
-	fmt.Printf("[webhook/linear] received task: %s (%s)\n", task.Title, task.ExternalID)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	fmt.Printf("[webhook/linear] received task: %s (%s)\n", incomingTask.Title, incomingTask.ExternalID)
+
+	conns, err := s.linearService.GetAllConnections(r.Context())
+	if err != nil || len(conns) == 0 {
+		fmt.Printf("[webhook/linear] no active Linear connections found: %v\n", err)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "no_org"})
+		return
+	}
+
+	// Parse raw issue data for ShouldProcessIssue filtering
+	var rawPayload map[string]interface{}
+	json.Unmarshal(body, &rawPayload)
+	rawIssueData, _ := rawPayload["data"].(map[string]interface{})
+
+	// Find the best matching org: prefer orgs whose filter labels/state match,
+	// fall back to first connection with a connected repo, then first connection overall.
+	var orgID string
+	for _, conn := range conns {
+		if s.linearService.ShouldProcessIssue(conn, rawIssueData) {
+			orgID = conn.OrgID
+			fmt.Printf("[webhook/linear] matched org %s (filter match)\n", orgID)
+			break
+		}
+	}
+	if orgID == "" {
+		// No filter match — pick first org that has a connected repo
+		for _, conn := range conns {
+			repos, _ := s.repoService.ListRepos(r.Context(), conn.OrgID)
+			if len(repos) > 0 {
+				orgID = conn.OrgID
+				fmt.Printf("[webhook/linear] matched org %s (has connected repo)\n", orgID)
+				break
+			}
+		}
+	}
+	if orgID == "" {
+		orgID = conns[0].OrgID
+		fmt.Printf("[webhook/linear] matched org %s (fallback to first)\n", orgID)
+	}
+
+	// Deduplicate: skip if we already have a task for this Linear issue
+	if incomingTask.ExternalID != "" {
+		exists, _ := s.taskService.TaskExistsForLinearIssue(r.Context(), orgID, incomingTask.ExternalID)
+		if exists {
+			fmt.Printf("[webhook/linear] task already exists for issue %s, skipping\n", incomingTask.ExternalID)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "duplicate"})
+			return
+		}
+	}
+
+	// Resolve the org's connected repo so the executor knows what to clone
+	repoFullName := ""
+	repos, repoErr := s.repoService.ListRepos(r.Context(), orgID)
+	if repoErr == nil && len(repos) > 0 {
+		repoFullName = repos[0].RepoFullName
+		fmt.Printf("[webhook/linear] using repo %s\n", repoFullName)
+	} else {
+		fmt.Printf("[webhook/linear] no connected repos, task will run without a repo\n")
+	}
+
+	task, err := s.taskService.CreateTask(r.Context(), orgID, services.CreateTaskRequest{
+		Title:            incomingTask.Title,
+		Description:      incomingTask.Description,
+		LinearIssueID:    incomingTask.ExternalID,
+		LinearIdentifier: incomingTask.Identifier,
+		LinearURL:        incomingTask.ExternalURL,
+		RepoFullName:     repoFullName,
+	})
+	if err != nil {
+		fmt.Printf("[webhook/linear] failed to create task: %v\n", err)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "error", "error": err.Error()})
+		return
+	}
+
+	fmt.Printf("[webhook/linear] created task %s, classifying...\n", task.ID)
+
+	// Use a background context — Linear webhooks time out in ~5s but classification needs ~10s
+	classCtx, classCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer classCancel()
+
+	classification, classErr := s.taskClassifier.ClassifyTask(classCtx, orgID, incomingTask, "")
+	if classErr != nil {
+		fmt.Printf("[webhook/linear] classification failed, defaulting to short: %v\n", classErr)
+		classification = &services.TaskClassification{Complexity: "short"}
+	}
+
+	fmt.Printf("[webhook/linear] classification: %s (%s)\n", classification.Complexity, classification.Reasoning)
+
+	if classification.Complexity == "long" && len(classification.SubTasks) > 1 {
+		s.orchestrateMultiAgent(orgID, task, classification, repoFullName)
+	} else {
+		go func() {
+			bgCtx := context.Background()
+			s.taskService.StartTaskExecution(bgCtx, orgID, task.ID)
+			s.taskExecutor.ExecuteTask(bgCtx, orgID, task.ID)
+		}()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":     "ok",
+		"task_id":    task.ID,
+		"complexity": classification.Complexity,
+	})
+}
+
+// orchestrateMultiAgent decomposes a long task into parallel agent sessions,
+// each with their own environment, branch, and scoped prompt.
+func (s *Server) orchestrateMultiAgent(orgID string, parentTask *models.AgentTask, classification *services.TaskClassification, repoFullName string) {
+	bgCtx := context.Background()
+
+	fmt.Printf("[orchestrate] long task %s: spawning %d sub-agents\n", parentTask.ID, len(classification.SubTasks))
+
+	// Create a manager session that tracks the overall task
+	managerSession, err := s.sessionService.CreateSession(bgCtx, &models.AgentSession{
+		TaskID:    parentTask.ID,
+		OrgID:     orgID,
+		AgentRole: "manager",
+		Status:    "active",
+	})
+	if err != nil {
+		fmt.Printf("[orchestrate] failed to create manager session: %v\n", err)
+		go func() {
+			s.taskService.StartTaskExecution(bgCtx, orgID, parentTask.ID)
+			s.taskExecutor.ExecuteTask(bgCtx, orgID, parentTask.ID)
+		}()
+		return
+	}
+
+	sessions, err := s.mergeService.SpawnParallelSessions(
+		bgCtx, orgID, parentTask.ID, "main",
+		classification.SubTasks, managerSession.ID,
+	)
+	if err != nil {
+		fmt.Printf("[orchestrate] failed to spawn sessions: %v, falling back to single agent\n", err)
+		go func() {
+			s.taskService.StartTaskExecution(bgCtx, orgID, parentTask.ID)
+			s.taskExecutor.ExecuteTask(bgCtx, orgID, parentTask.ID)
+		}()
+		return
+	}
+
+	// Create and execute a sub-task for each session
+	for i, session := range sessions {
+		subDef := classification.SubTasks[i]
+
+		scopeDesc := ""
+		if len(subDef.Scope.OwnedPaths) > 0 {
+			scopeDesc = fmt.Sprintf("\n\nYou are scoped to these paths: %s", strings.Join(subDef.Scope.OwnedPaths, ", "))
+		}
+
+		subTask, err := s.taskService.CreateTask(bgCtx, orgID, services.CreateTaskRequest{
+			Title:        fmt.Sprintf("[%s] %s", subDef.Role, parentTask.Title),
+			Description:  subDef.Description + scopeDesc,
+			RepoFullName: repoFullName,
+			Branch:       session.BranchName,
+			ParentTaskID: parentTask.ID,
+		})
+		if err != nil {
+			fmt.Printf("[orchestrate] failed to create sub-task for role %s: %v\n", subDef.Role, err)
+			continue
+		}
+
+		fmt.Printf("[orchestrate] sub-task %s (role=%s, branch=%s)\n", subTask.ID, subDef.Role, session.BranchName)
+
+		go func(taskID string) {
+			s.taskService.StartTaskExecution(bgCtx, orgID, taskID)
+			s.taskExecutor.ExecuteTask(bgCtx, orgID, taskID)
+		}(subTask.ID)
+	}
+
+	s.taskService.StartTaskExecution(bgCtx, orgID, parentTask.ID)
+
+	// Start background merge simulation to detect conflicts between sub-agents' branches
+	s.mergeService.StartMergeSimulation(parentTask.ID, orgID, "main")
+
+	fmt.Printf("[orchestrate] all %d sub-agents launched for task %s, merge simulation started\n", len(sessions), parentTask.ID)
+}
+
+// --- Providers ---
+
+var providerRegions = map[string][]string{
+	"aws":     {"us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1", "eu-central-1", "ap-southeast-1"},
+	"hetzner": {"fsn1", "nbg1", "hel1", "ash", "hil"},
+}
+
+func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	available := s.envService.AvailableProviders()
+	defaultProvider := s.envService.GetDefaultProvider()
+
+	regions := make(map[string][]string, len(available))
+	for _, p := range available {
+		if r, ok := providerRegions[p]; ok {
+			regions[p] = r
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"default":   defaultProvider,
+		"available": available,
+		"regions":   regions,
+	})
 }
 
 // --- Environments ---
@@ -890,12 +1125,13 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	orgID := GetOrgID(r.Context())
 	branch := r.URL.Query().Get("branch")
 
+	var snapshots []*models.Snapshot
+	var err error
 	if branch == "" {
-		writeError(w, http.StatusBadRequest, "branch query parameter is required")
-		return
+		snapshots, err = s.snapshotStore.ListByOrg(r.Context(), orgID)
+	} else {
+		snapshots, err = s.snapshotStore.ListByOrgAndBranch(r.Context(), orgID, branch)
 	}
-
-	snapshots, err := s.snapshotStore.ListByOrgAndBranch(r.Context(), orgID, branch)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

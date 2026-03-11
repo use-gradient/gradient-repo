@@ -58,18 +58,32 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 }
 
 export const SIZE_LABELS: Record<string, { label: string; desc: string; specs: string; rate: string }> = {
-  small:  { label: 'Starter',  desc: 'Light development',  specs: '2 vCPU · 4 GB RAM',  rate: '$0.15/hr' },
-  medium: { label: 'Standard', desc: 'General workloads',  specs: '4 vCPU · 8 GB RAM',  rate: '$0.35/hr' },
-  large:  { label: 'Pro',      desc: 'Heavy computation',  specs: '8 vCPU · 16 GB RAM', rate: '$0.70/hr' },
+  small:  { label: 'Starter',  desc: 'Light development',  specs: '2 vCPU · 4 GB RAM',  rate: '$0.05/hr' },
+  medium: { label: 'Standard', desc: 'General workloads',  specs: '4 vCPU · 16 GB RAM', rate: '$0.17/hr' },
+  large:  { label: 'Pro',      desc: 'Heavy computation',  specs: '8 vCPU · 32 GB RAM', rate: '$0.34/hr' },
   gpu:    { label: 'GPU',      desc: 'ML & AI training',   specs: 'GPU · 16 GB VRAM',   rate: '$3.50/hr' },
 }
 
 export const REGION_LABELS: Record<string, { label: string; flag: string }> = {
-  nbg1: { label: 'Nuremberg, DE', flag: '🇩🇪' },
-  fsn1: { label: 'Falkenstein, DE', flag: '🇩🇪' },
-  hel1: { label: 'Helsinki, FI', flag: '🇫🇮' },
-  ash:  { label: 'Ashburn, US', flag: '🇺🇸' },
-  hil:  { label: 'Hillsboro, US', flag: '🇺🇸' },
+  // AWS
+  'us-east-1':      { label: 'N. Virginia',  flag: '🇺🇸' },
+  'us-east-2':      { label: 'Ohio',         flag: '🇺🇸' },
+  'us-west-1':      { label: 'N. California', flag: '🇺🇸' },
+  'us-west-2':      { label: 'Oregon',       flag: '🇺🇸' },
+  'eu-west-1':      { label: 'Ireland',      flag: '🇮🇪' },
+  'eu-central-1':   { label: 'Frankfurt',    flag: '🇩🇪' },
+  'ap-southeast-1': { label: 'Singapore',    flag: '🇸🇬' },
+  // Hetzner
+  'fsn1': { label: 'Falkenstein', flag: '🇩🇪' },
+  'nbg1': { label: 'Nuremberg',  flag: '🇩🇪' },
+  'hel1': { label: 'Helsinki',   flag: '🇫🇮' },
+  'ash':  { label: 'Ashburn',    flag: '🇺🇸' },
+  'hil':  { label: 'Hillsboro',  flag: '🇺🇸' },
+}
+
+export const PROVIDER_LABELS: Record<string, { label: string; icon: string }> = {
+  aws:     { label: 'AWS EC2',  icon: '☁️' },
+  hetzner: { label: 'Hetzner',  icon: '🖥️' },
 }
 
 export const EVENT_TYPES: Record<string, { icon: string; label: string; color: string }> = {

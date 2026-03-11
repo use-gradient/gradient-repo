@@ -180,6 +180,27 @@ func (s *LinearService) DeleteConnection(ctx context.Context, orgID string) erro
 	return err
 }
 
+// GetAllConnections returns all active Linear connections (for webhook org lookup).
+func (s *LinearService) GetAllConnections(ctx context.Context) ([]*models.LinearConnection, error) {
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, org_id, workspace_id, workspace_name, status
+		FROM linear_connections WHERE status = 'active'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var conns []*models.LinearConnection
+	for rows.Next() {
+		c := &models.LinearConnection{}
+		if err := rows.Scan(&c.ID, &c.OrgID, &c.WorkspaceID, &c.WorkspaceName, &c.Status); err != nil {
+			return nil, err
+		}
+		conns = append(conns, c)
+	}
+	return conns, nil
+}
+
 // ─── Webhook Processing ─────────────────────────────────────────────────
 
 func (s *LinearService) VerifyWebhook(body []byte, signature, orgID string) bool {

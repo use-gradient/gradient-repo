@@ -78,24 +78,36 @@ func NewHetznerProvider(
 }
 
 // SizeToHetznerServerType maps environment size to Hetzner Cloud server type.
-// Hetzner deprecated cx22/cx32/cx42/cx52 in early 2026 → replaced with cx23/cx33/cx43/cx53.
-func SizeToHetznerServerType(size string) string {
+// cx-series is EU-only (fsn1/nbg1/hel1); US/APAC locations (ash/hil/sin) need cpx-series.
+func SizeToHetznerServerType(size, location string) string {
+	useShared := location == "ash" || location == "hil" || location == "sin"
 	switch size {
 	case "medium":
-		return "cx33" // 4 vCPU, 8 GB RAM
+		if useShared {
+			return "cpx31" // 4 vCPU, 8 GB RAM
+		}
+		return "cx33"
 	case "large":
-		return "cx43" // 8 vCPU, 16 GB RAM
+		if useShared {
+			return "cpx41" // 8 vCPU, 16 GB RAM
+		}
+		return "cx43"
 	case "gpu":
-		return "cx53" // 16 vCPU, 32 GB RAM (Hetzner doesn't have GPU instances; use largest shared)
+		if useShared {
+			return "cpx51" // 16 vCPU, 32 GB RAM
+		}
+		return "cx53"
 	default: // small
-		return "cx23" // 2 vCPU, 4 GB RAM
+		if useShared {
+			return "cpx21" // 3 vCPU, 4 GB RAM
+		}
+		return "cx23"
 	}
 }
 
 // CreateEnvironment launches a Hetzner Cloud Server and starts a Docker container inside it.
 // Returns the Hetzner server ID as the provider ref.
 func (p *HetznerProvider) CreateEnvironment(ctx context.Context, config *ProviderConfig) (string, error) {
-	serverType := SizeToHetznerServerType(config.Size)
 	serverName := fmt.Sprintf("gradient-%s", config.Name)
 
 	// Use the region from the request, fall back to provider default
@@ -103,6 +115,8 @@ func (p *HetznerProvider) CreateEnvironment(ctx context.Context, config *Provide
 	if location == "" {
 		location = p.location
 	}
+
+	serverType := SizeToHetznerServerType(config.Size, location)
 
 	log.Printf("Hetzner: Creating server (type=%s, location=%s) for env %s", serverType, location, config.Name)
 
@@ -659,6 +673,15 @@ docker run -d \
     -e GRADIENT_ENV_NAME=%s \
     %s \
     tail -f /dev/null
+
+echo "Installing tools inside container..."
+docker exec gradient-env bash -c '
+    apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        git curl jq wget build-essential \
+        python3 python3-pip python3-venv \
+        nodejs npm unzip zip ca-certificates 2>&1
+' || echo "Warning: in-container package install failed (may be snapshot with tools pre-baked)"
 
 echo "Gradient environment ready: %s"
 

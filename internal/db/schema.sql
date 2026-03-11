@@ -401,6 +401,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(org_id, status)
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_linear ON agent_tasks(linear_issue_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_env ON agent_tasks(environment_id);
 
+-- parent_task_id: links sub-tasks back to the orchestrating parent
+DO $$ BEGIN
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS parent_task_id VARCHAR(255) REFERENCES agent_tasks(id);
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent ON agent_tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;
+
 -- Task execution log (step-by-step audit log)
 CREATE TABLE IF NOT EXISTS task_execution_log (
     id VARCHAR(255) PRIMARY KEY,
@@ -513,3 +521,48 @@ CREATE TABLE IF NOT EXISTS context_objects (
 CREATE INDEX IF NOT EXISTS idx_context_objects_branch ON context_objects(org_id, branch);
 CREATE INDEX IF NOT EXISTS idx_context_objects_type ON context_objects(org_id, branch, type);
 CREATE INDEX IF NOT EXISTS idx_context_objects_source ON context_objects(source_session);
+
+-- ═══════════════════════════════════════════════════════════════
+-- Repo-scoped context mesh: add repo_full_name to environments,
+-- contexts, context_events, context_objects for per-repo isolation
+-- ═══════════════════════════════════════════════════════════════
+
+DO $$ BEGIN
+    ALTER TABLE environments ADD COLUMN IF NOT EXISTS repo_full_name VARCHAR(500) DEFAULT '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE contexts ADD COLUMN IF NOT EXISTS repo_full_name VARCHAR(500) DEFAULT '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE context_events ADD COLUMN IF NOT EXISTS repo_full_name VARCHAR(500) DEFAULT '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE context_objects ADD COLUMN IF NOT EXISTS repo_full_name TEXT DEFAULT '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- Replace the old unique constraint on contexts with repo-scoped one
+DO $$ BEGIN
+    ALTER TABLE contexts DROP CONSTRAINT IF EXISTS contexts_org_id_branch_key;
+    ALTER TABLE contexts ADD CONSTRAINT contexts_org_repo_branch_key UNIQUE (org_id, repo_full_name, branch);
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- Replace the old unique constraint on context_objects with repo-scoped one
+DO $$ BEGIN
+    ALTER TABLE context_objects DROP CONSTRAINT IF EXISTS context_objects_org_id_branch_type_key_key;
+    ALTER TABLE context_objects ADD CONSTRAINT context_objects_org_repo_branch_type_key_key UNIQUE (org_id, repo_full_name, branch, type, key);
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- Indexes for repo-scoped queries
+CREATE INDEX IF NOT EXISTS idx_environments_org_repo_branch ON environments(org_id, repo_full_name, context_branch, status);
+CREATE INDEX IF NOT EXISTS idx_context_events_repo_branch ON context_events(org_id, repo_full_name, branch, sequence);
+CREATE INDEX IF NOT EXISTS idx_contexts_org_repo ON contexts(org_id, repo_full_name);
+CREATE INDEX IF NOT EXISTS idx_context_objects_org_repo ON context_objects(org_id, repo_full_name, branch);

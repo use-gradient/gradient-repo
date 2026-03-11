@@ -238,6 +238,123 @@ func (p *AWSProvider) RestoreFromSnapshot(ctx context.Context, snapshotRef strin
 	return p.CreateEnvironment(ctx, config)
 }
 
+// GetServerIP returns the public IP of the EC2 instance.
+func (p *AWSProvider) GetServerIP(ctx context.Context, providerRef string) (string, error) {
+	result, err := p.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{providerRef},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
+		return "", fmt.Errorf("instance %s not found", providerRef)
+	}
+	inst := result.Reservations[0].Instances[0]
+	if inst.PublicIpAddress != nil {
+		return *inst.PublicIpAddress, nil
+	}
+	if inst.PrivateIpAddress != nil {
+		return *inst.PrivateIpAddress, nil
+	}
+	return "", nil
+}
+
+// ExecCommand runs a command on the EC2 instance via SSM SendCommand and waits for the result.
+func (p *AWSProvider) ExecCommand(ctx context.Context, providerRef string, command string, timeout time.Duration) (string, error) {
+	timeoutSec := int(timeout.Seconds())
+	if timeoutSec < 10 {
+		timeoutSec = 10
+	}
+
+	sendOutput, err := p.ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:  []string{providerRef},
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters: map[string][]string{
+			"commands":         {command},
+			"executionTimeout": {fmt.Sprintf("%d", timeoutSec)},
+		},
+		Comment: aws.String("gradient-exec"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("SSM SendCommand failed on %s: %w", providerRef, err)
+	}
+
+	commandID := *sendOutput.Command.CommandId
+	deadline := time.Now().Add(timeout + 30*time.Second)
+
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+
+		invocation, err := p.ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId:  aws.String(commandID),
+			InstanceId: aws.String(providerRef),
+		})
+		if err != nil {
+			continue
+		}
+
+		switch invocation.Status {
+		case ssmtypes.CommandInvocationStatusSuccess:
+			output := ""
+			if invocation.StandardOutputContent != nil {
+				output = *invocation.StandardOutputContent
+			}
+			return output, nil
+		case ssmtypes.CommandInvocationStatusFailed:
+			stderr := ""
+			if invocation.StandardErrorContent != nil {
+				stderr = *invocation.StandardErrorContent
+			}
+			stdout := ""
+			if invocation.StandardOutputContent != nil {
+				stdout = *invocation.StandardOutputContent
+			}
+			return stdout, fmt.Errorf("command failed on %s: %s", providerRef, stderr)
+		case ssmtypes.CommandInvocationStatusCancelled:
+			return "", fmt.Errorf("command cancelled on %s", providerRef)
+		case ssmtypes.CommandInvocationStatusTimedOut:
+			return "", fmt.Errorf("command timed out on %s", providerRef)
+		}
+	}
+
+	return "", fmt.Errorf("command polling timed out on %s (commandID=%s)", providerRef, commandID)
+}
+
+// WaitForReady blocks until the EC2 instance is running and the SSM agent is responding.
+func (p *AWSProvider) WaitForReady(ctx context.Context, providerRef string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+
+	// Phase 1: wait for instance to be running
+	for time.Now().Before(deadline) {
+		status, err := p.GetEnvironmentStatus(ctx, providerRef)
+		if err == nil && status == "running" {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	// Phase 2: wait for SSM agent to respond (cloud-init may still be running)
+	for time.Now().Before(deadline) {
+		_, err := p.ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+			InstanceIds:  []string{providerRef},
+			DocumentName: aws.String("AWS-RunShellScript"),
+			Parameters: map[string][]string{
+				"commands":         {"echo ready"},
+				"executionTimeout": {"10"},
+			},
+			Comment: aws.String("gradient-readiness-check"),
+		})
+		if err == nil {
+			// SSM accepted the command — agent is running
+			log.Printf("AWS: Instance %s SSM agent is ready", providerRef)
+			return nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	return fmt.Errorf("instance %s did not become SSM-ready within %v", providerRef, timeout)
+}
+
 // buildUserData generates the cloud-init script that runs on EC2 instance launch.
 // It pulls the specified Docker image and starts the gradient-env container.
 func (p *AWSProvider) buildUserData(image string, envName string) string {
@@ -250,32 +367,28 @@ func (p *AWSProvider) buildUserData(image string, envName string) string {
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
-# Log everything
 exec > /var/log/gradient-init.log 2>&1
-
 echo "Gradient environment init starting: %s"
 
-# Wait for Docker to be ready (AMI has Docker pre-installed)
+# ECS-optimized AMI: Docker + AWS CLI + SSM agent are pre-installed.
+# Just wait for Docker daemon to be ready.
 for i in $(seq 1 30); do
-    if docker info >/dev/null 2>&1; then
-        break
-    fi
+    if docker info >/dev/null 2>&1; then break; fi
     echo "Waiting for Docker daemon..."
     sleep 2
 done
 
+# Install git if not present (needed for repo cloning inside container)
+if ! command -v git &>/dev/null; then
+    yum install -y -q git 2>/dev/null || dnf install -y -q git 2>/dev/null || true
+fi
+
 # ECR login if needed (for snapshot restore)
 %s
 
-# Pull the base/snapshot image
 echo "Pulling image: %s"
-docker pull %s
+docker pull %s || echo "Pull failed, continuing with local image"
 
-# Start the gradient-env container
-# - Privileged for full system access (install packages, etc.)
-# - Host network so SSH to the EC2 host can reach in via docker exec
-# - Named "gradient-env" for snapshot commands (docker commit) to find it
-# - Keeps running indefinitely; users connect via SSM + docker exec
 docker run -d \
     --name gradient-env \
     --privileged \
@@ -286,9 +399,14 @@ docker run -d \
     %s \
     tail -f /dev/null
 
-echo "Gradient environment ready: %s"
+# Install essential tools inside the container
+docker exec gradient-env bash -c '
+    apt-get update -qq && apt-get install -y -qq git curl nodejs npm 2>/dev/null || \
+    (yum install -y -q git curl nodejs npm 2>/dev/null) || true
+    npm install -g @anthropic-ai/claude-code 2>/dev/null || echo "Claude CLI install deferred"
+' || echo "Container tool install deferred"
 
-# Signal readiness
+echo "Gradient environment ready: %s"
 echo "ready" > /tmp/gradient-status
 `, envName, ecrLogin, image, image, envName, image, envName)
 }
