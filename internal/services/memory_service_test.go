@@ -89,3 +89,41 @@ func TestScoreTipPrioritizesFailureSignature(t *testing.T) {
 		t.Fatalf("expected recovery tip with exact failure signature to outrank strategy tip, got recovery=%v strategy=%v", recoveryScore, strategyScore)
 	}
 }
+
+func TestLatestAttemptFiltersLogsAndSessions(t *testing.T) {
+	now := time.Now()
+	startedAt := now.Add(10 * time.Minute)
+	task := &models.AgentTask{
+		ID:        "task-1",
+		Status:    "complete",
+		StartedAt: &startedAt,
+	}
+
+	logs := []*models.TaskLogEntry{
+		{ID: "log-1", TaskID: task.ID, Step: "execution_started", CreatedAt: now},
+		{ID: "log-2", TaskID: task.ID, Step: "claude_output", CreatedAt: now.Add(2 * time.Minute)},
+		{ID: "log-3", TaskID: task.ID, Step: "execution_started", CreatedAt: startedAt},
+		{ID: "log-4", TaskID: task.ID, Step: "claude_output", CreatedAt: startedAt.Add(2 * time.Minute)},
+	}
+
+	sessions := []*models.AgentSession{
+		{ID: "session-1", TaskID: task.ID, CreatedAt: now.Add(3 * time.Minute)},
+		{ID: "session-2", TaskID: task.ID, CreatedAt: startedAt.Add(3 * time.Minute)},
+	}
+
+	filteredLogs := latestAttemptLogs(task, logs)
+	if len(filteredLogs) != 2 {
+		t.Fatalf("expected 2 logs from latest attempt, got %d", len(filteredLogs))
+	}
+	if filteredLogs[0].ID != "log-3" || filteredLogs[1].ID != "log-4" {
+		t.Fatalf("unexpected latest attempt logs: %#v", filteredLogs)
+	}
+
+	filteredSessions := latestAttemptSessions(task, logs, sessions)
+	if len(filteredSessions) != 1 {
+		t.Fatalf("expected 1 session from latest attempt, got %d", len(filteredSessions))
+	}
+	if filteredSessions[0].ID != "session-2" {
+		t.Fatalf("expected latest session to be session-2, got %s", filteredSessions[0].ID)
+	}
+}

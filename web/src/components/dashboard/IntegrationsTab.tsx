@@ -33,7 +33,7 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
       max_turns: parseInt(maxTurns) || 50,
     })
     if (result) {
-      toast('success', 'Claude Code configured')
+      toast('success', 'Anthropic key configured')
       setApiKey('')
       onSaved()
       onClose()
@@ -41,7 +41,7 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Configure Claude Code" description="Add your Anthropic API key to enable AI agent tasks" size="sm" footer={
+    <Modal open={open} onClose={onClose} title="Add Anthropic API Key" description="Gradient credits cover the platform layer. Anthropic bills the AI tokens directly to your account." size="sm" footer={
       <div className="flex gap-2">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
         <Button onClick={handleSave} loading={loading} disabled={!apiKey}>
@@ -78,6 +78,9 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
           onChange={e => setMaxTurns(e.target.value)}
           type="number"
         />
+        <p className="text-xs text-muted-foreground">
+          Gradient automatically whitelists its repo memory MCP tools during task execution, so you do not need to manually add tool IDs for live context or durable guidance retrieval.
+        </p>
         <p className="text-xs text-muted-foreground">
           Get an API key from{' '}
           <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
@@ -319,7 +322,7 @@ export default function IntegrationsTab() {
 
   const handleDisconnectClaude = async () => {
     await disconnectClaude(null)
-    toast('success', 'Claude Code disconnected')
+    toast('success', 'Anthropic key removed')
     refetch()
   }
 
@@ -363,7 +366,7 @@ export default function IntegrationsTab() {
             <p className="text-xs text-muted-foreground mt-0.5">
               {isReady
                 ? 'Linear issues labeled "gradient-agent" will be automatically picked up.'
-                : 'Connect Linear and configure Claude Code to start running AI agent tasks.'}
+                : 'Connect Linear and add an Anthropic key to start running AI agent tasks.'}
             </p>
           </div>
         </div>
@@ -424,7 +427,7 @@ export default function IntegrationsTab() {
             </div>
           </Card>
 
-          {/* Claude Code */}
+          {/* Anthropic / Claude */}
           <Card className="p-5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -435,7 +438,7 @@ export default function IntegrationsTab() {
                   <Bot className="w-5 h-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-foreground">Claude Code</p>
+                  <p className="text-sm font-medium text-foreground">Anthropic / Claude</p>
                   <p className="text-xs text-muted-foreground">
                     {status?.claude?.configured
                       ? `Model: ${status.claude.model || 'claude-sonnet-4-20250514'}`
@@ -547,8 +550,8 @@ export default function IntegrationsTab() {
             <div className="space-y-3 text-xs text-muted-foreground">
               {[
                 'Label a Linear issue with "gradient-agent" and move it to Todo',
-                'Gradient spins up a cloud environment with your repo context',
-                'Claude Code works on the task autonomously (edit, test, commit)',
+                'Gradient spins up a cloud environment with repo memory and live context',
+                'Claude works on the task using your own Anthropic key',
                 'A pull request is created and the Linear issue is updated',
               ].map((s, i) => (
                 <div key={i} className="flex gap-3">

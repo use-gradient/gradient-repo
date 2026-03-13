@@ -22,21 +22,21 @@ export const docsSections: DocsSection[] = [
         title: 'Introduction',
         content: `# Introduction
 
-Gradient is a platform for **persistent, context-aware cloud development environments**. Every install, every test failure, every learned pattern is saved per branch and shared across your team in real-time.
+Gradient is a platform for **persistent, context-aware cloud development environments**. Every install, test failure, learned tip, and trajectory analysis is saved around the repository and shared across your team in real-time.
 
 ## What problem does Gradient solve?
 
-Every developer has experienced this: you spin up a new dev environment, and you have to reinstall everything, reconfigure everything, and rediscover every workaround. Gradient eliminates this by giving every branch a **persistent memory**.
+Every developer has experienced this: you spin up a new dev environment, and you have to reinstall everything, reconfigure everything, and rediscover every workaround. Gradient eliminates this by giving every repository a **persistent memory layer** with branch-aware live context.
 
 ### Key capabilities
 
-- **Context Memory** — Every branch remembers installed packages, test failures, learned patterns, and config changes
+- **Repo Memory** — Gradient stores durable strategy, recovery, and optimization tips alongside branch-aware context
 - **Live Context Mesh** — Multiple environments on the same branch share discoveries in real-time via NATS JetStream
 - **Auto Snapshots** — Automatic snapshots every 15 minutes, on git push, and on stop. Never lose work
 - **GitHub Auto-Fork** — New branches automatically inherit parent branch context and snapshots
-- **Agent Tasks** — Delegate coding tasks to Claude Code running on Gradient environments, triggered from Linear issues or manually
-- **Integrations** — Connect Linear for issue tracking and Claude Code for AI-powered task execution
-- **Smart Billing** — 20 free hours/month, per-second billing after that, with no hidden fees
+- **Agent Tasks** — Delegate coding tasks to Claude running on Gradient environments, triggered from Linear issues or manually
+- **Integrations** — Connect Linear for issue tracking and add your Anthropic key for AI-powered task execution
+- **Smart Billing** — $10 of included credits each month, usage-based billing after that, with no hidden fees
 
 ## Architecture
 
@@ -159,7 +159,7 @@ graph TB
 
 ### Day 4 — Delegate work to an AI agent
 
-The team has a backlog of test coverage to write. Instead of doing it manually, they create an **Agent Task** and let Claude Code handle it on a Gradient environment.
+The team has a backlog of test coverage to write. Instead of doing it manually, they create an **Agent Task** and let Claude handle it on a Gradient environment.
 
 \`\`\`bash
 gc task create \\
@@ -168,14 +168,14 @@ gc task create \\
   --auto-start
 \`\`\`
 
-Gradient spins up an environment, loads the branch context, clones the repo, and hands it to Claude Code. When it finishes, the task posts a pull request.
+Gradient spins up an environment, loads the branch context, clones the repo, and hands it to Claude. When it finishes, the task posts a pull request.
 
 \`\`\`mermaid
 graph LR
   Task["Agent Task"] -->|provisions| Env["Cloud Env"]
   Env -->|loads| Ctx["Branch Context"]
   Env -->|clones| Repo["vision-api repo"]
-  Env -->|runs| Claude["Claude Code"]
+  Env -->|runs| Claude["Claude"]
   Claude -->|opens| PR["Pull Request"]
 \`\`\`
 
@@ -192,7 +192,7 @@ Next week, when Alex creates a new environment on the same branch, it boots righ
 \`\`\`mermaid
 graph LR
   Destroy["env destroyed"] -->|auto-snapshot| Snap["Snapshot saved"]
-  Destroy -->|context preserved| Store["Context Store"]
+  Destroy -->|context preserved| Store["Repo Memory"]
   Store -->|restores to| NewEnv["New environment"]
   Snap -->|restores to| NewEnv
 \`\`\`
@@ -207,7 +207,7 @@ graph LR
 | Dashboard | Web UI at \`/dashboard\` |
 | REST API | HTTP endpoints at \`/api/v1/*\` |
 | MCP Server | JSON-RPC stdio for AI agents (Cursor, Claude) |
-| Agent Tasks | AI-powered task execution via Claude Code |
+| Agent Tasks | AI-powered task execution via Claude |
 
 ## Next steps
 
@@ -308,9 +308,9 @@ A Gradient environment is a Docker container running on a cloud server (Hetzner,
 
 Environments are billed per second while running, with a 1-minute minimum.
 
-## Context Store
+## Repo Memory
 
-The context store is a per-branch persistent memory in PostgreSQL. It tracks:
+Gradient keeps repo-level durable memory plus branch-level operational context in PostgreSQL. The branch context layer tracks:
 
 - **Installed packages** — name, version, manager, install time
 - **Previous failures** — test name, error message, timestamp
@@ -319,7 +319,7 @@ The context store is a per-branch persistent memory in PostgreSQL. It tracks:
 - **Global configs** — environment variables and settings
 - **Base OS** — the operating system of the environment
 
-When you create a new branch from \`main\`, the context can be auto-forked so the new branch starts with all of \`main\`'s knowledge.
+When you create a new branch from \`main\`, the operational context can be auto-forked so the new branch starts with the right local state while durable tips remain shared at the repository level.
 
 ## Live Context Mesh
 
@@ -702,7 +702,7 @@ Billing and usage commands.
 
 ## gc billing status
 
-Show current billing tier, payment status, and free tier usage.
+Show current billing tier, payment status, and included credit usage.
 
 \`\`\`bash
 gc billing status
@@ -723,12 +723,14 @@ Show usage for the current billing period.
 gc billing usage
 # Usage Summary (2026-03)
 # ─────────────────────────────
-#   Small hours:   2.50  ($0.38)
-#   Medium hours:  0.00  ($0.00)
-#   Large hours:   0.00  ($0.00)
-#   GPU hours:     0.00  ($0.00)
+#   Small hours:   2.50
+#   Medium hours:  0.00
+#   Large hours:   0.00
+#   GPU hours:     0.00
 # ─────────────────────────────
-#   Total:         2.50 hrs  $0.38
+#   Total:         2.50 hrs
+#   Credits:       150 total  0 billable  150 included
+#   Estimated:     $0.00
 \`\`\`
 
 ## gc billing setup
@@ -739,7 +741,7 @@ Set up Stripe billing for your organization.
 gc billing setup --name "My Startup" --email billing@company.com
 \`\`\`
 
-This creates a Stripe customer, configures metered subscriptions, and upgrades your org to the paid tier.
+This creates a Stripe customer, configures the credits subscription, and upgrades your org to the paid tier.
 
 ## gc billing invoices
 
@@ -749,10 +751,10 @@ List invoices.
 gc billing invoices
 \`\`\`
 
-## Free Tier Rules
+## Included Monthly Trial Credits
 
-- **20 hours/month** of compute time
-- **Starter (small) instances only**
+- **$10 of credits each month**
+- Works across all environment sizes, with larger sizes consuming credits faster
 - No credit card required
 - Resets on the 1st of each month
 
@@ -768,9 +770,9 @@ gc billing invoices
         title: 'gc task',
         content: `# gc task
 
-Agent task management commands. Tasks are executed by Claude Code on Gradient cloud environments.
+Agent task management commands. Tasks are executed by Claude on Gradient cloud environments.
 
-> **Prerequisite:** Claude Code must be configured before creating tasks. Run \`gc integration claude --api-key <key>\` first.
+> **Prerequisite:** An Anthropic API key must be configured before creating tasks. Run \`gc integration claude --api-key <key>\` first.
 
 ## gc task create
 
@@ -850,7 +852,7 @@ View the step-by-step execution log for a task.
 gc task logs <task-id>
 # ✓ [created] Task created — just now
 # ● [execution_started] Task execution began — 2m ago
-# ✓ [queued_for_execution] Task queued for Claude Code execution — 2m ago
+# ✓ [queued_for_execution] Task queued for Claude execution — 2m ago
 \`\`\`
 
 ## gc task stats
@@ -894,7 +896,7 @@ gc integration status
 
 ## gc integration claude
 
-Configure or view Claude Code settings.
+Configure or view Anthropic / Claude settings.
 
 ### Set API key
 
@@ -1451,13 +1453,13 @@ gc context show --branch feature/new-auth
         title: 'Agent Tasks',
         content: `# Agent Tasks Guide
 
-Use Gradient's agent task system to delegate coding work to Claude Code. Tasks run on Gradient cloud environments with full context awareness.
+Use Gradient's agent task system to delegate coding work to Claude. Tasks run on Gradient cloud environments with full context awareness.
 
 ## Prerequisites
 
 Before creating tasks, you need:
 
-1. **Claude Code configured** — An Anthropic API key saved in Integrations
+1. **Anthropic key configured** — An Anthropic API key saved in Integrations
 2. **Linear connected** (optional) — For issue-driven workflows
 
 Check readiness:
@@ -1468,16 +1470,16 @@ gc integration status
 
 ## Setting up
 
-### 1. Configure Claude Code
+### 1. Configure Anthropic / Claude
 
 \`\`\`bash
 gc integration claude --api-key sk-ant-api03-xxxxx
-# ✓ Claude Code configured
+# ✓ Anthropic key configured
 #   Model:    claude-sonnet-4-20250514
 #   API Key:  sk-ant-...xxxxx
 \`\`\`
 
-Or use the dashboard: **Integrations → Claude Code → Configure**
+Or use the dashboard: **Integrations → Anthropic / Claude → Configure**
 
 ### 2. Connect Linear (optional)
 
@@ -1555,7 +1557,7 @@ pending → running → complete
 \`\`\`
 
 1. **pending** — Task created, waiting to start
-2. **running** — Claude Code is executing the task
+2. **running** — Claude is executing the task
 3. **complete** — Task finished successfully
 4. **failed** — Task encountered an error (can retry)
 5. **cancelled** — Task was manually cancelled
@@ -1567,7 +1569,7 @@ When a task runs, Gradient:
 1. Provisions a cloud environment (or reuses one)
 2. Clones the repository and checks out the branch
 3. Loads branch context (packages, patterns, previous work)
-4. Runs Claude Code with the task prompt
+4. Runs Claude with the task prompt
 5. Saves any context discoveries back to the store
 6. Takes a snapshot of the final state
 7. Optionally creates a pull request
@@ -1581,7 +1583,7 @@ Each task logs token usage and estimated cost. View aggregate costs with:
 gc task stats
 \`\`\`
 
-You can set cost limits per task in the Claude Code configuration (max cost per task) and control concurrency in task settings.`,
+You can set cost limits per task in the Anthropic / Claude configuration (max cost per task) and control concurrency in task settings.`,
       },
       {
         id: 'mcp-agent',
@@ -1666,14 +1668,14 @@ Click **New Environment** to open the creation wizard:
 
 1. **Name** — Give your environment a descriptive name (e.g. \`dev-api\`, \`ml-training\`)
 2. **Size** — Choose an instance size:
-   - **Starter (small)** — 2 vCPU, 4 GB RAM, $0.15/hr *(free tier eligible)*
+   - **Starter (small)** — 2 vCPU, 4 GB RAM, $0.15/hr
    - **Standard (medium)** — 4 vCPU, 8 GB RAM, $0.35/hr
    - **Pro (large)** — 8 vCPU, 16 GB RAM, $0.70/hr
    - **GPU** — GPU with 16 GB VRAM, $3.50/hr
 3. **Region** — Select a datacenter region (nbg1, fsn1, hel1)
 4. **Branch** — Optionally link to a context branch so the environment starts with full context memory
 
-> **Note:** Free tier users can only create **Starter (small)** instances. Upgrade by adding a payment method in the Billing tab.
+> **Note:** Included monthly credits can be used on any environment size. Larger sizes consume credits faster. Add a payment method in the Billing tab to continue once the included credits are exhausted.
 
 ## Environment cards
 
@@ -1717,10 +1719,10 @@ Your **context is preserved** — the next environment on the same branch starts
       },
       {
         id: 'context',
-        title: 'Context',
-        content: `# Context — Dashboard
+        title: 'Memory',
+        content: `# Memory — Dashboard
 
-The **Context** tab lets you view, manage, and interact with your branch-level persistent memory and the live context mesh.
+The **Memory** tab lets you view the repository's durable memory, branch context, retrieval history, and live context mesh.
 
 ## Branch list
 
@@ -1797,12 +1799,12 @@ This is useful for testing, manual context updates, or sharing discoveries with 
 
 The **Billing** tab shows your usage, costs, and subscription status.
 
-## Free tier status
+## Trial credit status
 
-The prominent ring chart shows your free tier usage:
+The prominent ring chart shows your included monthly credits:
 
-- **20 hours/month** included for free
-- **Starter (small) instances only** on the free tier
+- **$10 worth of credits** included each month
+- All environment sizes can draw from the same credit pool
 - Resets on the 1st of each month
 - Progress ring turns yellow at 75% and red at 90%
 
@@ -1810,16 +1812,16 @@ The prominent ring chart shows your free tier usage:
 
 A breakdown by instance size showing:
 - Hours used per size (small, medium, large, GPU)
-- Cost per size
-- Total cost for the billing period
+- Total credits consumed and remaining included credits
+- Current billable cost for the billing period
 
 ## Upgrade banner
 
-If you're on the free tier, an upgrade banner explains:
+If you're using the included monthly credits, an upgrade banner explains:
 - What you get by adding a payment method
 - All instance sizes unlocked
-- No monthly hour limit
-- Per-second billing
+- Continued usage after the included credits are exhausted
+- Usage-based billing
 
 Click **Set up billing** to configure Stripe for your organization.
 
@@ -1854,18 +1856,18 @@ When you click **Set up billing**, the system:
         title: 'Tasks',
         content: `# Tasks — Dashboard
 
-The **Tasks** tab lets you create, monitor, and manage AI agent tasks powered by Claude Code.
+The **Tasks** tab lets you create, monitor, and manage AI agent tasks powered by your Anthropic / Claude configuration.
 
-> **Prerequisite:** You must configure Claude Code in the Integrations tab before the Tasks tab becomes active. Without it, you'll see a setup prompt with a link to Integrations.
+> **Prerequisite:** You must add an Anthropic API key in the Integrations tab before the Tasks tab becomes active. Without it, you'll see a setup prompt with a link to Integrations.
 
 ## Readiness gate
 
 When you first visit the Tasks tab, Gradient checks if your org is ready to run tasks:
 
-- ✓ **Claude Code configured** (required) — Your Anthropic API key must be saved
+- ✓ **Anthropic key configured** (required) — Your Anthropic API key must be saved
 - ○ **Linear connected** (optional) — Enables issue-driven task creation
 
-If Claude Code isn't configured, the Tasks tab shows a setup card with links to the Integrations page. No task creation is possible until this is resolved.
+If the Anthropic key isn't configured, the Tasks tab shows a setup card with links to the Integrations page. No task creation is possible until this is resolved.
 
 ## Creating a task
 
@@ -1936,13 +1938,13 @@ The Overview sub-tab shows aggregate statistics:
 
 The **Integrations** tab is your hub for connecting third-party services that power Gradient's agent tasks and GitHub auto-fork features.
 
-## Claude Code
+## Anthropic / Claude
 
-Claude Code is the AI engine that executes agent tasks. Configuration is required before tasks can be created.
+Claude is the AI engine that executes agent tasks. Configuration is required before tasks can be created.
 
-### Setting up Claude Code
+### Setting up Anthropic / Claude
 
-1. Click **Configure** on the Claude Code card
+1. Click **Configure** on the Anthropic / Claude card
 2. Enter your Anthropic API key (\`sk-ant-api03-...\`)
 3. Optionally adjust the model (default: \`claude-sonnet-4-20250514\`) and max turns (default: 50)
 4. Click **Save**
@@ -1982,7 +1984,7 @@ Once connected, the card shows:
 1. A developer creates a Linear issue and adds the \`gradient-agent\` label
 2. Linear sends a webhook to Gradient
 3. Gradient creates an agent task from the issue title and description
-4. Claude Code executes the task on a Gradient environment
+4. Claude executes the task on a Gradient environment
 5. Results are posted back to the Linear issue as a comment
 
 ## GitHub Repositories
@@ -2192,13 +2194,13 @@ A compact grid of the most common CLI commands organized by category:
 - Billing starts when the environment status becomes \`running\`
 - Billing stops when the environment is destroyed
 
-## Free tier
+## Included monthly credits
 
-- **20 hours/month** of compute time
-- **Starter (small) instances only**
+- **$10 worth of credits each month**
+- All environment sizes consume from the same credit pool
 - No credit card required
 - Resets on the 1st of each month
-- If you exceed 20 hours, you must add a payment method to continue
+- If you exhaust the included credits, you must add a payment method to continue
 
 ## Paid tier
 
@@ -2290,7 +2292,7 @@ All events in the live context mesh follow this schema:
 |------|-------|-------------|
 | 400 | \`bad_request\` | Invalid request parameters |
 | 401 | \`unauthorized\` | Missing or invalid auth token |
-| 402 | \`payment_required\` | Billing gate — free tier exceeded or payment required |
+| 402 | \`payment_required\` | Billing gate — included credits exhausted or payment required |
 | 403 | \`forbidden\` | Insufficient permissions |
 | 404 | \`not_found\` | Resource not found |
 | 409 | \`conflict\` | Resource already exists |
@@ -2302,16 +2304,16 @@ All events in the live context mesh follow this schema:
 
 | Error | Meaning | Resolution |
 |-------|---------|------------|
-| \`free_tier_exhausted\` | 20 free hours used this month | Add a payment method |
+| \`free_tier_exhausted\` | Included monthly credits exhausted | Add a payment method |
 | \`payment_method_required\` | Requested size requires payment | Set up billing |
-| \`size_not_allowed\` | Free tier only allows small | Upgrade or use small |
+| \`size_not_allowed\` | Requested environment size is blocked by org policy | Choose a different size or update org policy |
 | \`stripe_not_configured\` | Server missing Stripe keys | Configure STRIPE_SECRET_KEY |
 
 ## Task-specific errors
 
 | Error | Meaning | Resolution |
 |-------|---------|------------|
-| \`claude_not_configured\` | Claude Code API key not set | \`gc integration claude --api-key ...\` or configure in dashboard |
+| \`claude_not_configured\` | Anthropic API key not set | \`gc integration claude --api-key ...\` or configure in dashboard |
 | \`task_not_in_valid_state\` | Task can't be started/cancelled in current state | Check task status with \`gc task get <id>\` |`,
       },
     ],

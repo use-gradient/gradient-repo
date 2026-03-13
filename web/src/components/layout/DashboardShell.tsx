@@ -11,7 +11,7 @@ const IS_DEV = import.meta.env.DEV
 const tabTitles: Record<string, string> = {
   environments:  'Environments',
   tasks:         'Agent Tasks',
-  context:       'Context Store',
+  context:       'Repo Memory',
   billing:       'Billing & Usage',
   integrations:  'Integrations',
   'get-started': 'Get Started',

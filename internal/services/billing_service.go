@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,44 +13,67 @@ import (
 	"github.com/gradient/gradient/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/stripe/stripe-go/v76"
+	"github.com/stripe/stripe-go/v76/billing/meterevent"
 	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
 	"github.com/stripe/stripe-go/v76/customer"
 	"github.com/stripe/stripe-go/v76/invoice"
 	"github.com/stripe/stripe-go/v76/paymentmethod"
+	priceclient "github.com/stripe/stripe-go/v76/price"
 	"github.com/stripe/stripe-go/v76/subscription"
-	"github.com/stripe/stripe-go/v76/usagerecord"
 )
 
-// Billing constants — free tier limits
+// Billing constants — free trial and credits
 const (
-	FreeTierMonthlyHours = 20.0   // 20 free hours per month
-	FreeTierAllowedSize  = "small" // Free tier only allows "small" environments
-	MinBilledSeconds     = 60     // Minimum 1 minute billing
+	DefaultCreditPackageCredits = int64(1000)
+	DefaultCreditPackageCents   = int64(300) // $3.00 per 1,000 credits
+	DefaultFreeTrialCreditUSD   = 10.0
+	MinBilledSeconds            = 60
 )
 
 // AllSizes lists all valid environment sizes
 var AllSizes = []string{"small", "medium", "large", "gpu"}
 
-type BillingService struct {
-	db            *db.DB
-	enabled       bool   // Stripe enabled
-	priceSmallID  string // Stripe Price ID for small tier
-	priceMediumID string // Stripe Price ID for medium tier
-	priceLargeID  string // Stripe Price ID for large tier
-	priceGPUID    string // Stripe Price ID for GPU tier
+var creditMultipliersBySize = map[string]int64{
+	"small":  1,
+	"medium": 3,
+	"large":  5,
+	"gpu":    24,
 }
 
-func NewBillingService(database *db.DB, stripeKey, priceSmallID, priceMediumID, priceLargeID, priceGPUID string) *BillingService {
+type BillingService struct {
+	db                     *db.DB
+	enabled                bool
+	priceCreditsID         string
+	creditMeterEventName   string
+	creditMeterCustomerKey string
+	creditMeterValueKey    string
+	freeTrialCreditUSD     float64
+}
+
+func NewBillingService(database *db.DB, stripeKey, priceCreditsID, creditMeterEventName, creditMeterCustomerKey, creditMeterValueKey string, freeTrialCreditUSD float64) *BillingService {
 	if stripeKey != "" {
 		stripe.Key = stripeKey
 	}
+	if creditMeterEventName == "" {
+		creditMeterEventName = "gradient_credits"
+	}
+	if creditMeterCustomerKey == "" {
+		creditMeterCustomerKey = "stripe_customer_id"
+	}
+	if creditMeterValueKey == "" {
+		creditMeterValueKey = "credits"
+	}
+	if freeTrialCreditUSD <= 0 {
+		freeTrialCreditUSD = DefaultFreeTrialCreditUSD
+	}
 	return &BillingService{
-		db:            database,
-		enabled:       stripeKey != "",
-		priceSmallID:  priceSmallID,
-		priceMediumID: priceMediumID,
-		priceLargeID:  priceLargeID,
-		priceGPUID:    priceGPUID,
+		db:                     database,
+		enabled:                stripeKey != "",
+		priceCreditsID:         priceCreditsID,
+		creditMeterEventName:   creditMeterEventName,
+		creditMeterCustomerKey: creditMeterCustomerKey,
+		creditMeterValueKey:    creditMeterValueKey,
+		freeTrialCreditUSD:     freeTrialCreditUSD,
 	}
 }
 
@@ -64,9 +89,9 @@ func (s *BillingService) StripeConfigured() bool {
 //
 // Rules:
 //   - Stripe MUST be configured (even in dev — use test keys)
-//   - Free tier (no payment method): 20 hours/month, "small" only
-//   - After 20 hours without payment method: HARD BLOCK — must add payment
-//   - Paid tier (has payment method): any size, no hour limit
+//   - Free users get a monthly included credit allowance worth freeTrialCreditUSD
+//   - Once free credits are exhausted, a payment method is required to continue
+//   - Paid tier (has payment method): any size, no free-tier gating
 func (s *BillingService) CheckBillingAllowed(ctx context.Context, orgID, requestedSize string) error {
 	if !s.enabled {
 		return fmt.Errorf("billing system unavailable — Stripe is not configured (set STRIPE_SECRET_KEY)")
@@ -85,20 +110,10 @@ func (s *BillingService) CheckBillingAllowed(ctx context.Context, orgID, request
 		return nil
 	}
 
-	// Free tier checks
-	// 1. Size restriction: free tier only allows "small"
-	if requestedSize != FreeTierAllowedSize {
+	if status.FreeCreditsLeft <= 0 {
 		return fmt.Errorf(
-			"free tier only allows '%s' environments — upgrade to pay-as-you-go by adding a payment method (gc billing setup) to use '%s' instances",
-			FreeTierAllowedSize, requestedSize,
-		)
-	}
-
-	// 2. Hours limit: free tier capped at 20 hours/month
-	if status.FreeHoursLeft <= 0 {
-		return fmt.Errorf(
-			"free tier limit reached: %.1f/%.0f hours used this month — add a payment method to continue (gc billing setup)",
-			status.FreeHoursUsed, status.FreeHoursLimit,
+			"free trial credits exhausted: %d/%d credits used this month (about $%.2f included) — add a payment method to continue (gc billing setup)",
+			status.FreeCreditsUsed, status.FreeCreditsLimit, status.FreeTrialValueUSD,
 		)
 	}
 
@@ -109,8 +124,7 @@ func (s *BillingService) CheckBillingAllowed(ctx context.Context, orgID, request
 func (s *BillingService) GetBillingStatus(ctx context.Context, orgID string) (*models.BillingStatus, error) {
 	month := time.Now().Format("2006-01")
 
-	// Get current month usage (including currently running envs)
-	usedHours, err := s.getMonthlyUsedHours(ctx, orgID, month)
+	summary, err := s.GetUsageSummary(ctx, orgID, month)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute usage: %w", err)
 	}
@@ -129,90 +143,30 @@ func (s *BillingService) GetBillingStatus(ctx context.Context, orgID string) (*m
 		tier = "paid"
 	}
 
-	freeLeft := FreeTierMonthlyHours - usedHours
-	if freeLeft < 0 {
-		freeLeft = 0
-	}
+	freeCreditsLimit := summary.IncludedCredits
+	freeCreditsUsed := minInt64(summary.TotalCredits, summary.IncludedCredits)
+	freeCreditsLeft := maxInt64(0, freeCreditsLimit-freeCreditsUsed)
 
-	// Determine allowed sizes
 	allowedSizes := AllSizes
-	canCreate := true
-	if !hasPayment {
-		allowedSizes = []string{FreeTierAllowedSize}
-		if freeLeft <= 0 {
-			canCreate = false
-		}
-	}
+	canCreate := hasPayment || freeCreditsLeft > 0
 
 	return &models.BillingStatus{
-		OrgID:            orgID,
-		Tier:             tier,
-		HasPaymentMethod: hasPayment,
-		StripeConfigured: s.enabled,
-		FreeHoursUsed:    usedHours,
-		FreeHoursLimit:   FreeTierMonthlyHours,
-		FreeHoursLeft:    freeLeft,
-		CanCreateEnv:     canCreate,
-		AllowedSizes:     allowedSizes,
-		Month:            month,
+		OrgID:             orgID,
+		Tier:              tier,
+		HasPaymentMethod:  hasPayment,
+		StripeConfigured:  s.enabled,
+		FreeHoursUsed:     float64(freeCreditsUsed) / 60.0,
+		FreeHoursLimit:    float64(freeCreditsLimit) / 60.0,
+		FreeHoursLeft:     float64(freeCreditsLeft) / 60.0,
+		FreeCreditsUsed:   freeCreditsUsed,
+		FreeCreditsLimit:  freeCreditsLimit,
+		FreeCreditsLeft:   freeCreditsLeft,
+		FreeTrialValueUSD: s.freeTrialCreditUSD,
+		EstimatedCostUSD:  summary.TotalCost,
+		CanCreateEnv:      canCreate,
+		AllowedSizes:      allowedSizes,
+		Month:             month,
 	}, nil
-}
-
-// HasPaymentMethod checks if an org has a Stripe customer, subscription, AND an actual
-// payment method (card) attached. A subscription without a payment method is not "active".
-func (s *BillingService) HasPaymentMethod(ctx context.Context, orgID string) bool {
-	settings, err := s.getOrgSettings(ctx, orgID)
-	if err != nil {
-		return false
-	}
-	if settings.StripeCustomerID == "" || settings.StripeSubscriptionID == "" {
-		return false
-	}
-
-	// Verify an actual payment method exists on the Stripe customer
-	if !s.enabled {
-		return false
-	}
-	params := &stripe.PaymentMethodListParams{
-		Customer: stripe.String(settings.StripeCustomerID),
-		Type:     stripe.String("card"),
-	}
-	i := paymentmethod.List(params)
-	return i.Next() // true only if at least one card is attached
-}
-
-// getMonthlyUsedHours returns total hours used this month, INCLUDING currently running envs.
-func (s *BillingService) getMonthlyUsedHours(ctx context.Context, orgID, month string) (float64, error) {
-	// Completed sessions: sum of billed_seconds
-	query := `
-		SELECT COALESCE(SUM(billed_seconds), 0)
-		FROM usage_events
-		WHERE org_id = $1
-		  AND TO_CHAR(started_at, 'YYYY-MM') = $2
-		  AND billed_seconds > 0
-	`
-	var completedSeconds int
-	err := s.db.Pool.QueryRow(ctx, query, orgID, month).Scan(&completedSeconds)
-	if err != nil {
-		return 0, err
-	}
-
-	// Currently running sessions: compute live duration
-	activeQuery := `
-		SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (NOW() - started_at))::INTEGER), 0)
-		FROM usage_events
-		WHERE org_id = $1
-		  AND TO_CHAR(started_at, 'YYYY-MM') = $2
-		  AND stopped_at IS NULL
-	`
-	var activeSeconds int
-	err = s.db.Pool.QueryRow(ctx, activeQuery, orgID, month).Scan(&activeSeconds)
-	if err != nil {
-		return 0, err
-	}
-
-	totalSeconds := completedSeconds + activeSeconds
-	return float64(totalSeconds) / 3600.0, nil
 }
 
 // ─── Usage Tracking ─────────────────────────────────────────────────────────
@@ -255,7 +209,7 @@ func (s *BillingService) TrackUsageStop(ctx context.Context, envID string) error
 		if billedSeconds < MinBilledSeconds {
 			billedSeconds = MinBilledSeconds
 		}
-		if reportErr := s.ReportUsageToStripe(ctx, orgID, size, billedSeconds); reportErr != nil {
+		if reportErr := s.ReportUsageToStripe(ctx, orgID, envID, size, billedSeconds); reportErr != nil {
 			// Log as ERROR — Stripe must be configured. If this fires, billing is broken.
 			log.Printf("[billing] ERROR: Failed to report usage to Stripe for org %s: %v", orgID, reportErr)
 		}
@@ -267,7 +221,71 @@ func (s *BillingService) TrackUsageStop(ctx context.Context, envID string) error
 // GetUsageSummary calculates usage summary for an org in a given month.
 // Includes both completed and currently-running sessions.
 func (s *BillingService) GetUsageSummary(ctx context.Context, orgID, month string) (*models.UsageSummary, error) {
-	// Completed sessions
+	smallSec, mediumSec, largeSec, gpuSec, err := s.getUsageSecondsBySize(ctx, orgID, month)
+	if err != nil {
+		return nil, err
+	}
+
+	smallHours := float64(smallSec) / 3600.0
+	mediumHours := float64(mediumSec) / 3600.0
+	largeHours := float64(largeSec) / 3600.0
+	gpuHours := float64(gpuSec) / 3600.0
+	totalHours := smallHours + mediumHours + largeHours + gpuHours
+
+	totalCredits := creditsForDuration("small", smallSec) +
+		creditsForDuration("medium", mediumSec) +
+		creditsForDuration("large", largeSec) +
+		creditsForDuration("gpu", gpuSec)
+	pricing, _ := s.getCreditPricing(ctx)
+	includedCredits := pricing.FreeTrialCredits(s.freeTrialCreditUSD)
+	if s.HasPaymentMethod(ctx, orgID) {
+		includedCredits = 0
+	}
+	if includedCredits < 0 {
+		includedCredits = 0
+	}
+	billableCredits := maxInt64(0, totalCredits-includedCredits)
+	totalCost := pricing.EstimatedCostUSD(billableCredits)
+
+	return &models.UsageSummary{
+		OrgID:            orgID,
+		Month:            month,
+		TotalHours:       totalHours,
+		TotalCost:        totalCost,
+		SmallHours:       smallHours,
+		MediumHours:      mediumHours,
+		LargeHours:       largeHours,
+		GPUHours:         gpuHours,
+		TotalCredits:     totalCredits,
+		IncludedCredits:  includedCredits,
+		BillableCredits:  billableCredits,
+		IncludedValueUSD: s.freeTrialCreditUSD,
+	}, nil
+}
+
+// HasPaymentMethod checks if an org has a Stripe customer, subscription, AND an actual
+// payment method (card) attached. A subscription without a payment method is not "active".
+func (s *BillingService) HasPaymentMethod(ctx context.Context, orgID string) bool {
+	settings, err := s.getOrgSettings(ctx, orgID)
+	if err != nil {
+		return false
+	}
+	if settings.StripeCustomerID == "" || settings.StripeSubscriptionID == "" {
+		return false
+	}
+	if !s.enabled {
+		return false
+	}
+
+	params := &stripe.PaymentMethodListParams{
+		Customer: stripe.String(settings.StripeCustomerID),
+		Type:     stripe.String("card"),
+	}
+	i := paymentmethod.List(params)
+	return i.Next()
+}
+
+func (s *BillingService) getUsageSecondsBySize(ctx context.Context, orgID, month string) (int, int, int, int, error) {
 	query := `
 		SELECT
 			COALESCE(SUM(CASE WHEN size = 'small' THEN billed_seconds ELSE 0 END), 0) as small_seconds,
@@ -279,14 +297,11 @@ func (s *BillingService) GetUsageSummary(ctx context.Context, orgID, month strin
 		  AND TO_CHAR(started_at, 'YYYY-MM') = $2
 		  AND billed_seconds > 0
 	`
-
 	var smallSec, mediumSec, largeSec, gpuSec int
-	err := s.db.Pool.QueryRow(ctx, query, orgID, month).Scan(&smallSec, &mediumSec, &largeSec, &gpuSec)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get usage summary: %w", err)
+	if err := s.db.Pool.QueryRow(ctx, query, orgID, month).Scan(&smallSec, &mediumSec, &largeSec, &gpuSec); err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("failed to get usage summary: %w", err)
 	}
 
-	// Add currently running sessions
 	activeQuery := `
 		SELECT
 			COALESCE(SUM(CASE WHEN size = 'small' THEN EXTRACT(EPOCH FROM (NOW() - started_at))::INTEGER ELSE 0 END), 0),
@@ -305,25 +320,80 @@ func (s *BillingService) GetUsageSummary(ctx context.Context, orgID, month strin
 		largeSec += activeLarge
 		gpuSec += activeGPU
 	}
+	return smallSec, mediumSec, largeSec, gpuSec, nil
+}
 
-	smallHours := float64(smallSec) / 3600.0
-	mediumHours := float64(mediumSec) / 3600.0
-	largeHours := float64(largeSec) / 3600.0
-	gpuHours := float64(gpuSec) / 3600.0
+type creditPricing struct {
+	PackageAmountCents int64
+	PackageCredits     int64
+	USDPerCredit       float64
+}
 
-	totalHours := smallHours + mediumHours + largeHours + gpuHours
-	totalCost := (smallHours * 0.15) + (mediumHours * 0.35) + (largeHours * 0.70) + (gpuHours * 3.50)
+func (p creditPricing) FreeTrialCredits(usd float64) int64 {
+	if usd <= 0 || p.USDPerCredit <= 0 {
+		return 0
+	}
+	return int64(math.Floor(usd / p.USDPerCredit))
+}
 
-	return &models.UsageSummary{
-		OrgID:       orgID,
-		Month:       month,
-		TotalHours:  totalHours,
-		TotalCost:   totalCost,
-		SmallHours:  smallHours,
-		MediumHours: mediumHours,
-		LargeHours:  largeHours,
-		GPUHours:    gpuHours,
+func (p creditPricing) EstimatedCostUSD(credits int64) float64 {
+	if credits <= 0 || p.USDPerCredit <= 0 {
+		return 0
+	}
+	return float64(credits) * p.USDPerCredit
+}
+
+func (s *BillingService) getCreditPricing(ctx context.Context) (creditPricing, error) {
+	pricing := creditPricing{
+		PackageAmountCents: DefaultCreditPackageCents,
+		PackageCredits:     DefaultCreditPackageCredits,
+		USDPerCredit:       float64(DefaultCreditPackageCents) / 100.0 / float64(DefaultCreditPackageCredits),
+	}
+	if !s.enabled || s.priceCreditsID == "" {
+		return pricing, nil
+	}
+
+	stripePrice, err := priceclient.Get(s.priceCreditsID, nil)
+	if err != nil {
+		return pricing, nil
+	}
+
+	packageCredits := int64(1)
+	if stripePrice.TransformQuantity != nil && stripePrice.TransformQuantity.DivideBy > 0 {
+		packageCredits = stripePrice.TransformQuantity.DivideBy
+	}
+	packageAmountCents := stripePrice.UnitAmount
+	if packageAmountCents <= 0 && stripePrice.UnitAmountDecimal > 0 {
+		packageAmountCents = int64(math.Round(stripePrice.UnitAmountDecimal))
+	}
+	if packageAmountCents <= 0 {
+		packageAmountCents = DefaultCreditPackageCents
+	}
+
+	return creditPricing{
+		PackageAmountCents: packageAmountCents,
+		PackageCredits:     packageCredits,
+		USDPerCredit:       float64(packageAmountCents) / 100.0 / float64(packageCredits),
 	}, nil
+}
+
+func creditsForDuration(size string, billedSeconds int) int64 {
+	if billedSeconds <= 0 {
+		return 0
+	}
+	if billedSeconds < MinBilledSeconds {
+		billedSeconds = MinBilledSeconds
+	}
+	minutes := int64((billedSeconds + 59) / 60)
+	multiplier := creditMultiplier(size)
+	return minutes * multiplier
+}
+
+func creditMultiplier(size string) int64 {
+	if multiplier, ok := creditMultipliersBySize[size]; ok {
+		return multiplier
+	}
+	return creditMultipliersBySize["small"]
 }
 
 // GetActiveUsageEvents returns all currently running usage events for an org
@@ -393,8 +463,8 @@ func (s *BillingService) EnsureStripeCustomer(ctx context.Context, orgID, email,
 	return c.ID, nil
 }
 
-// CreateMeteredSubscription creates a Stripe subscription with metered billing for an org.
-// This sets up the pricing tiers so usage records can be reported.
+// CreateMeteredSubscription creates a Stripe subscription with credit-based metered billing for an org.
+// This sets up the usage-based credits price so billing meter events can be reported.
 // Once a subscription is active, the org is automatically upgraded to "paid" tier.
 // Stripe MUST be configured — even in dev, all billing goes through Stripe (use test keys).
 func (s *BillingService) CreateMeteredSubscription(ctx context.Context, orgID string) (string, error) {
@@ -412,36 +482,15 @@ func (s *BillingService) CreateMeteredSubscription(ctx context.Context, orgID st
 		return settings.StripeSubscriptionID, nil
 	}
 
-	// Build subscription items from configured price IDs
-	var items []*stripe.SubscriptionItemsParams
-	if s.priceSmallID != "" {
-		items = append(items, &stripe.SubscriptionItemsParams{
-			Price: stripe.String(s.priceSmallID),
-		})
-	}
-	if s.priceMediumID != "" {
-		items = append(items, &stripe.SubscriptionItemsParams{
-			Price: stripe.String(s.priceMediumID),
-		})
-	}
-	if s.priceLargeID != "" {
-		items = append(items, &stripe.SubscriptionItemsParams{
-			Price: stripe.String(s.priceLargeID),
-		})
-	}
-	if s.priceGPUID != "" {
-		items = append(items, &stripe.SubscriptionItemsParams{
-			Price: stripe.String(s.priceGPUID),
-		})
-	}
-
-	if len(items) == 0 {
-		return "", fmt.Errorf("no Stripe price IDs configured — set STRIPE_PRICE_SMALL_ID, etc.")
+	if s.priceCreditsID == "" {
+		return "", fmt.Errorf("no Stripe credits price configured — set STRIPE_PRICE_CREDITS_ID")
 	}
 
 	params := &stripe.SubscriptionParams{
 		Customer: stripe.String(settings.StripeCustomerID),
-		Items:    items,
+		Items: []*stripe.SubscriptionItemsParams{{
+			Price: stripe.String(s.priceCreditsID),
+		}},
 	}
 	params.AddMetadata("org_id", orgID)
 
@@ -462,98 +511,47 @@ func (s *BillingService) CreateMeteredSubscription(ctx context.Context, orgID st
 	return sub.ID, nil
 }
 
-// ReportUsageToStripe sends a usage record to Stripe for metered billing.
+// ReportUsageToStripe sends credit usage to Stripe as billing meter events.
 // Called when an environment is stopped (TrackUsageStop).
-// Reports usage in minutes (Stripe prices should be set as per-minute rates).
-// Minimum billing: 1 minute (60 seconds).
-// Stripe MUST be configured — even in dev, all billing goes through Stripe (use test keys).
-func (s *BillingService) ReportUsageToStripe(ctx context.Context, orgID, size string, billedSeconds int) error {
+func (s *BillingService) ReportUsageToStripe(ctx context.Context, orgID, envID, size string, billedSeconds int) error {
 	if !s.enabled {
 		return fmt.Errorf("Stripe is not configured — set STRIPE_SECRET_KEY (use Stripe test keys for development)")
 	}
 
 	settings, err := s.getOrgSettings(ctx, orgID)
 	if err != nil || settings.StripeSubscriptionID == "" {
-		// No subscription = free tier user. Usage is tracked in the DB but not reported to Stripe.
-		// This is expected — free tier users don't have Stripe subscriptions.
-		log.Printf("[billing] No subscription for org %s (free tier), usage tracked in DB only", orgID)
+		// No subscription = trial-only org. Usage is tracked in the DB but not reported to Stripe.
+		log.Printf("[billing] No subscription for org %s (trial-only), usage tracked in DB only", orgID)
 		return nil
 	}
 
-	// Get subscription items to find the right one for this size
-	sub, err := subscription.Get(settings.StripeSubscriptionID, nil)
-	if err != nil {
-		return fmt.Errorf("failed to get subscription: %w", err)
-	}
-
-	// Find the subscription item matching this size's price
-	priceID := s.sizeToPriceID(size)
-	if priceID == "" {
-		log.Printf("[billing] No price ID configured for size %s, skipping usage report", size)
+	if settings.StripeCustomerID == "" {
+		log.Printf("[billing] No Stripe customer found for org %s, skipping usage report", orgID)
 		return nil
 	}
 
-	var subItemID string
-	for _, item := range sub.Items.Data {
-		if item.Price.ID == priceID {
-			subItemID = item.ID
-			break
-		}
-	}
-
-	if subItemID == "" {
-		log.Printf("[billing] No subscription item found for price %s, skipping usage report", priceID)
+	credits := creditsForDuration(size, billedSeconds)
+	if credits <= 0 {
 		return nil
 	}
 
-	// Enforce minimum billing of 1 minute
-	if billedSeconds < MinBilledSeconds {
-		billedSeconds = MinBilledSeconds
+	params := &stripe.BillingMeterEventParams{
+		EventName:  stripe.String(s.creditMeterEventName),
+		Identifier: stripe.String(fmt.Sprintf("%s-%s-%s-%d", orgID, envID, size, time.Now().UnixNano())),
+		Timestamp:  stripe.Int64(time.Now().Unix()),
+		Payload: map[string]string{
+			s.creditMeterCustomerKey: settings.StripeCustomerID,
+			s.creditMeterValueKey:    strconv.FormatInt(credits, 10),
+		},
 	}
 
-	// Report usage in minutes (rounded up) for proper per-second billing granularity
-	// A 12-minute session = 12 minutes (not 1 hour)
-	minutes := int64(billedSeconds+59) / 60
-	if minutes < 1 {
-		minutes = 1
-	}
-
-	params := &stripe.UsageRecordParams{
-		SubscriptionItem: stripe.String(subItemID),
-		Quantity:         stripe.Int64(minutes),
-		Timestamp:        stripe.Int64(time.Now().Unix()),
-		Action:           stripe.String("increment"),
-	}
-
-	_, err = usagerecord.New(params)
+	_, err = meterevent.New(params)
 	if err != nil {
 		return fmt.Errorf("failed to report usage to Stripe: %w", err)
 	}
 
-	log.Printf("[billing] Reported %d minutes (%d seconds) of %s usage to Stripe for org %s", minutes, billedSeconds, size, orgID)
+	log.Printf("[billing] Reported %d credits (%d seconds, %s) to Stripe for org %s", credits, billedSeconds, size, orgID)
 	return nil
-}
-
-// sizeToPriceID maps environment size to the configured Stripe price ID.
-func (s *BillingService) sizeToPriceID(size string) string {
-	switch size {
-	case "small":
-		return s.priceSmallID
-	case "medium":
-		return s.priceMediumID
-	case "large":
-		return s.priceLargeID
-	case "gpu":
-		// GPU has its own price ($3.50/hr vs $0.70/hr for large)
-		if s.priceGPUID != "" {
-			return s.priceGPUID
-		}
-		// Fallback to large if GPU price not configured (log warning)
-		log.Printf("[billing] WARNING: GPU price ID not configured (STRIPE_PRICE_GPU_ID), falling back to large price")
-		return s.priceLargeID
-	default:
-		return s.priceSmallID
-	}
 }
 
 // GetStripeInvoices lists invoices for an org from Stripe.
@@ -565,7 +563,7 @@ func (s *BillingService) GetStripeInvoices(ctx context.Context, orgID string) ([
 
 	settings, err := s.getOrgSettings(ctx, orgID)
 	if err != nil || settings.StripeCustomerID == "" {
-		// No Stripe customer = no invoices. Not an error — free tier users won't have a customer.
+		// No Stripe customer = no invoices. Not an error for orgs still on included credits.
 		return []*stripe.Invoice{}, nil
 	}
 
@@ -743,4 +741,18 @@ func (s *BillingService) upgradeToPaid(ctx context.Context, orgID string) {
 // GetOrgSettings returns org settings (public accessor)
 func (s *BillingService) GetOrgSettings(ctx context.Context, orgID string) (*models.OrgSettings, error) {
 	return s.getOrgSettings(ctx, orgID)
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

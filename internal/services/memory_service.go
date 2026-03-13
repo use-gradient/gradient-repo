@@ -163,6 +163,17 @@ func (s *TrajectoryMemoryService) SeedTipsFromContext(ctx context.Context, repoF
 }
 
 func (s *TrajectoryMemoryService) GenerateTipsForTask(ctx context.Context, orgID, taskID string) ([]*models.MemoryTip, error) {
+	task, err := s.getTask(ctx, orgID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil || task.RepoFullName == "" {
+		return nil, nil
+	}
+	if shouldSkipTrajectoryMemory(task) {
+		return nil, nil
+	}
+
 	if s.analysisService != nil {
 		if analysis, err := s.analysisService.AnalyzeTask(ctx, orgID, taskID); err == nil && analysis != nil {
 			tips, genErr := s.generateTipsFromAnalysis(ctx, analysis)
@@ -187,11 +198,13 @@ func (s *TrajectoryMemoryService) generateHeuristicTipsForTask(ctx context.Conte
 	if err != nil {
 		return nil, err
 	}
+	logs = latestAttemptLogs(task, logs)
 
 	sessions, err := s.sessionService.ListSessionsByTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
+	sessions = latestAttemptSessions(task, logs, sessions)
 
 	var bundles []*models.ChangeBundle
 	sessionIDs := make([]string, 0, len(sessions))
@@ -409,6 +422,156 @@ func (s *TrajectoryMemoryService) BuildGuidanceSnapshot(items []RetrievedTip) ma
 	snapshot["tips"] = tips
 
 	return snapshot
+}
+
+func (s *TrajectoryMemoryService) ListTipsByRepo(ctx context.Context, orgID, repoFullName string, limit int) ([]*models.MemoryTip, error) {
+	if orgID == "" || repoFullName == "" {
+		return []*models.MemoryTip{}, nil
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, org_id, repo_full_name, source_branch, tip_type, scope, title, content,
+		       COALESCE(trigger_condition, ''), action_steps, priority, confidence, canonical_key,
+		       COALESCE(failure_signature, ''), COALESCE(task_fingerprint, ''), keywords,
+		       COALESCE(search_text, ''), COALESCE(semantic_summary, ''), COALESCE(outcome_class, ''),
+		       COALESCE(embedding_status, 'disabled'), COALESCE(embedding_model, ''), embedding_updated_at,
+		       evidence_count, use_count, last_retrieved_at, created_at, updated_at
+		FROM memory_tips
+		WHERE org_id = $1 AND repo_full_name = $2
+		ORDER BY updated_at DESC
+		LIMIT $3
+	`, orgID, repoFullName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list memory tips: %w", err)
+	}
+	defer rows.Close()
+
+	tips := make([]*models.MemoryTip, 0, limit)
+	for rows.Next() {
+		tip, err := scanMemoryTip(rows)
+		if err != nil {
+			return nil, err
+		}
+		tips = append(tips, tip)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating memory tips: %w", err)
+	}
+	return tips, nil
+}
+
+func (s *TrajectoryMemoryService) GetTipsByIDs(ctx context.Context, orgID, repoFullName string, ids []string) ([]*models.MemoryTip, error) {
+	ids = uniqueStrings(ids)
+	if orgID == "" || repoFullName == "" || len(ids) == 0 {
+		return []*models.MemoryTip{}, nil
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, org_id, repo_full_name, source_branch, tip_type, scope, title, content,
+		       COALESCE(trigger_condition, ''), action_steps, priority, confidence, canonical_key,
+		       COALESCE(failure_signature, ''), COALESCE(task_fingerprint, ''), keywords,
+		       COALESCE(search_text, ''), COALESCE(semantic_summary, ''), COALESCE(outcome_class, ''),
+		       COALESCE(embedding_status, 'disabled'), COALESCE(embedding_model, ''), embedding_updated_at,
+		       evidence_count, use_count, last_retrieved_at, created_at, updated_at
+		FROM memory_tips
+		WHERE org_id = $1 AND repo_full_name = $2 AND id = ANY($3)
+	`, orgID, repoFullName, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query memory tips by id: %w", err)
+	}
+	defer rows.Close()
+
+	tips := make([]*models.MemoryTip, 0, len(ids))
+	for rows.Next() {
+		tip, err := scanMemoryTip(rows)
+		if err != nil {
+			return nil, err
+		}
+		tips = append(tips, tip)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating memory tips by id: %w", err)
+	}
+	return tips, nil
+}
+
+func (s *TrajectoryMemoryService) ListAnalysesByRepo(ctx context.Context, orgID, repoFullName string, limit int) ([]*models.TrajectoryAnalysis, error) {
+	if orgID == "" || repoFullName == "" {
+		return []*models.TrajectoryAnalysis{}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, org_id, repo_full_name, task_id, COALESCE(session_id::text, ''), COALESCE(source_branch, ''),
+		       COALESCE(trajectory_summary, ''), COALESCE(outcome_class, ''), COALESCE(immediate_cause, ''),
+		       COALESCE(proximate_cause, ''), COALESCE(root_cause, ''), COALESCE(recovery_action, ''),
+		       COALESCE(recovery_reason, ''), COALESCE(inefficiency_pattern, ''), COALESCE(recommended_alternative, ''),
+		       subtask_analyses, COALESCE(analyzer_version, ''), COALESCE(model_name, ''), confidence,
+		       created_at, updated_at
+		FROM trajectory_analyses
+		WHERE org_id = $1 AND repo_full_name = $2
+		ORDER BY created_at DESC
+		LIMIT $3
+	`, orgID, repoFullName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list trajectory analyses: %w", err)
+	}
+	defer rows.Close()
+
+	analyses := make([]*models.TrajectoryAnalysis, 0, limit)
+	for rows.Next() {
+		analysis, err := scanTrajectoryAnalysis(rows)
+		if err != nil {
+			return nil, err
+		}
+		analyses = append(analyses, analysis)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating trajectory analyses: %w", err)
+	}
+	return analyses, nil
+}
+
+func (s *TrajectoryMemoryService) ListRetrievalRunsByRepo(ctx context.Context, orgID, repoFullName string, limit int) ([]*models.RetrievalRun, error) {
+	if orgID == "" || repoFullName == "" {
+		return []*models.RetrievalRun{}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, org_id, repo_full_name, COALESCE(task_id, ''), COALESCE(session_id::text, ''),
+		       COALESCE(query_text, ''), COALESCE(subtask, ''), COALESCE(failure_signature, ''),
+		       candidate_tip_ids, reranked_tip_ids, selected_tip_ids, vector_search_used,
+		       COALESCE(reranker_model, ''), COALESCE(status, ''), latency_ms, created_at
+		FROM retrieval_runs
+		WHERE org_id = $1 AND repo_full_name = $2
+		ORDER BY created_at DESC
+		LIMIT $3
+	`, orgID, repoFullName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list retrieval runs: %w", err)
+	}
+	defer rows.Close()
+
+	runs := make([]*models.RetrievalRun, 0, limit)
+	for rows.Next() {
+		run, err := scanRetrievalRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating retrieval runs: %w", err)
+	}
+	return runs, nil
 }
 
 func (s *TrajectoryMemoryService) generateTipsFromAnalysis(ctx context.Context, analysis *models.TrajectoryAnalysis) ([]*models.MemoryTip, error) {
@@ -904,6 +1067,79 @@ func (s *TrajectoryMemoryService) getTaskLogs(ctx context.Context, taskID string
 	return logs, nil
 }
 
+func latestAttemptLogs(task *models.AgentTask, logs []*models.TaskLogEntry) []*models.TaskLogEntry {
+	if len(logs) == 0 {
+		return logs
+	}
+
+	var boundary *time.Time
+	for _, log := range logs {
+		if log == nil || log.Step != "execution_started" {
+			continue
+		}
+		if boundary == nil || log.CreatedAt.After(*boundary) {
+			ts := log.CreatedAt
+			boundary = &ts
+		}
+	}
+	if boundary == nil && task != nil && task.StartedAt != nil {
+		ts := *task.StartedAt
+		boundary = &ts
+	}
+	if boundary == nil {
+		return logs
+	}
+
+	filtered := make([]*models.TaskLogEntry, 0, len(logs))
+	for _, log := range logs {
+		if log == nil {
+			continue
+		}
+		if log.CreatedAt.Before(*boundary) {
+			continue
+		}
+		filtered = append(filtered, log)
+	}
+	if len(filtered) == 0 {
+		return logs
+	}
+	return filtered
+}
+
+func latestAttemptSessions(task *models.AgentTask, logs []*models.TaskLogEntry, sessions []*models.AgentSession) []*models.AgentSession {
+	if len(sessions) == 0 {
+		return sessions
+	}
+
+	var boundary *time.Time
+	if filteredLogs := latestAttemptLogs(task, logs); len(filteredLogs) > 0 {
+		ts := filteredLogs[0].CreatedAt
+		boundary = &ts
+	}
+	if boundary == nil && task != nil && task.StartedAt != nil {
+		ts := *task.StartedAt
+		boundary = &ts
+	}
+	if boundary == nil {
+		return sessions
+	}
+
+	filtered := make([]*models.AgentSession, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		if session.CreatedAt.Before(*boundary) {
+			continue
+		}
+		filtered = append(filtered, session)
+	}
+	if len(filtered) == 0 {
+		return []*models.AgentSession{sessions[len(sessions)-1]}
+	}
+	return filtered
+}
+
 func (s *TrajectoryMemoryService) getTrajectoryEvents(ctx context.Context, task *models.AgentTask, sessionIDs []string) ([]trajectoryEvent, error) {
 	if task == nil || task.OrgID == "" || task.Branch == "" || task.RepoFullName == "" {
 		return nil, nil
@@ -1293,6 +1529,34 @@ func scanMemoryTip(scanner interface {
 	return tip, nil
 }
 
+func scanRetrievalRun(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*models.RetrievalRun, error) {
+	run := &models.RetrievalRun{}
+	var (
+		taskID        string
+		sessionID     string
+		candidateJSON []byte
+		rerankedJSON  []byte
+		selectedJSON  []byte
+	)
+	err := scanner.Scan(
+		&run.ID, &run.OrgID, &run.RepoFullName, &taskID, &sessionID,
+		&run.QueryText, &run.Subtask, &run.FailureSignature,
+		&candidateJSON, &rerankedJSON, &selectedJSON, &run.VectorSearchUsed,
+		&run.RerankerModel, &run.Status, &run.LatencyMs, &run.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan retrieval run: %w", err)
+	}
+	run.TaskID = taskID
+	run.SessionID = sessionID
+	_ = json.Unmarshal(candidateJSON, &run.CandidateTipIDs)
+	_ = json.Unmarshal(rerankedJSON, &run.RerankedTipIDs)
+	_ = json.Unmarshal(selectedJSON, &run.SelectedTipIDs)
+	return run, nil
+}
+
 func (st *subtaskSummary) displayName() string {
 	if strings.TrimSpace(st.Name) == "" {
 		return "task"
@@ -1440,6 +1704,45 @@ func clampConfidence(value float64) float64 {
 		return 1
 	}
 	return value
+}
+
+func shouldSkipTrajectoryMemory(task *models.AgentTask) bool {
+	if task == nil {
+		return true
+	}
+
+	text := strings.ToLower(strings.Join([]string{
+		task.ErrorMessage,
+		task.OutputSummary,
+	}, " "))
+
+	skipPatterns := []string{
+		"invalid api key",
+		"fix external api key",
+		"claude code not configured",
+		"authentication failed",
+		"authentication error",
+		"unauthorized",
+		"forbidden",
+		"api key is invalid",
+		"missing api key",
+		"no valid session id",
+		"--resume requires a valid session id",
+		"provider unavailable",
+		"failed to provision environment",
+		"environment failed to become ready",
+		"instance never became",
+		"cloud-init did not complete",
+		"docker not installed",
+		"claude cli install failed",
+	}
+
+	for _, pattern := range skipPatterns {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func stringValue(value interface{}) string {

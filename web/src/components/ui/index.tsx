@@ -289,7 +289,7 @@ export function Modal({ open, onClose, title, description, children, footer, siz
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content className={cn(
-          'fixed left-[50%] top-[50%] z-50 grid min-w-[50%] translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-lg duration-200',
+          'fixed left-[50%] top-[50%] z-50 flex min-w-[50%] max-w-[calc(100vw-2rem)] flex-col translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-lg duration-200',
           'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
           'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
           'data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%]',
@@ -300,7 +300,7 @@ export function Modal({ open, onClose, title, description, children, footer, siz
             <DialogPrimitive.Title className="text-lg font-semibold leading-none tracking-tight text-foreground">{title}</DialogPrimitive.Title>
             {description && <DialogPrimitive.Description className="text-sm text-muted-foreground">{description}</DialogPrimitive.Description>}
           </div>
-          <div className="overflow-y-auto min-h-0">{children}</div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">{children}</div>
           {footer && <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 shrink-0">{footer}</div>}
           <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
             <X className="h-4 w-4" />

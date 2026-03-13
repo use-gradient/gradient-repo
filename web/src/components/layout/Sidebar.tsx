@@ -29,7 +29,7 @@ const navItems = [
   { to: '/dashboard/get-started',  label: 'Get Started',  icon: Rocket },
   { to: '/dashboard/environments', label: 'Environments', icon: Server },
   { to: '/dashboard/tasks',        label: 'Tasks',        icon: Bot },
-  { to: '/dashboard/context',      label: 'Context',      icon: Brain },
+  { to: '/dashboard/context',      label: 'Memory',       icon: Brain },
   { to: '/dashboard/billing',      label: 'Billing',      icon: CreditCard },
   { to: '/dashboard/integrations', label: 'Integrations', icon: Plug },
   { to: '/dashboard/settings',     label: 'Settings',     icon: Settings },

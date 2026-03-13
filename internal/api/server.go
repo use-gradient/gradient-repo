@@ -125,15 +125,23 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	})
 	contextStore := gradctx.NewStore(database)
 	contextService := services.NewContextService(contextStore)
-	billingService := services.NewBillingService(database, cfg.StripeSecretKey, cfg.StripePriceSmallID, cfg.StripePriceMediumID, cfg.StripePriceLargeID, cfg.StripePriceGPUID)
+	billingService := services.NewBillingService(
+		database,
+		cfg.StripeSecretKey,
+		cfg.StripePriceCreditsID,
+		cfg.StripeCreditMeterEventName,
+		cfg.StripeCreditMeterCustomerKey,
+		cfg.StripeCreditMeterValueKey,
+		cfg.FreeTrialCreditUSD,
+	)
 	if !billingService.StripeConfigured() {
 		fmt.Println("[init] ⚠️  WARNING: STRIPE_SECRET_KEY is not set — billing operations will fail!")
 		fmt.Println("[init]    Even in development, Stripe must be configured. Use Stripe test keys (sk_test_...).")
 		fmt.Println("[init]    Free tier checks will still work, but billing setup, invoices, and usage reporting will error.")
 	} else {
 		fmt.Println("[init] ✓ Stripe billing configured")
-		if cfg.StripePriceSmallID == "" || cfg.StripePriceMediumID == "" || cfg.StripePriceLargeID == "" {
-			fmt.Println("[init] ⚠️  WARNING: Some STRIPE_PRICE_*_ID env vars are missing — metered subscriptions may fail")
+		if cfg.StripePriceCreditsID == "" {
+			fmt.Println("[init] ⚠️  WARNING: STRIPE_PRICE_CREDITS_ID is missing — credit subscriptions and usage billing may fail")
 		}
 	}
 	repoService := services.NewRepoService(database, envService, cfg.GitHubAppWebhookSecret)
@@ -227,7 +235,7 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	fmt.Println("[init] ✓ Agent task service initialized")
 
 	taskExecutor := services.NewTaskExecutorService(
-		database, envService, claudeService, taskService, githubService, linearService, contextService, sessionService, memoryService, meshPublisher, snapshotStore,
+		database, envService, billingService, claudeService, taskService, githubService, linearService, contextService, sessionService, memoryService, meshPublisher, snapshotStore,
 	)
 
 	mergeService := services.NewMergeService(database, sessionService, envService, meshPublisher)
@@ -362,6 +370,7 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	authenticated.HandleFunc("/contexts", s.handleListContexts).Methods("GET")
 	authenticated.HandleFunc("/contexts/{branch:.+}", s.handleGetContext).Methods("GET")
 	authenticated.HandleFunc("/contexts/{branch:.+}", s.handleDeleteContext).Methods("DELETE")
+	authenticated.HandleFunc("/memory/overview", s.handleMemoryOverview).Methods("GET")
 
 	// Snapshots
 	authenticated.HandleFunc("/snapshots", s.handleListSnapshots).Methods("GET")
@@ -980,8 +989,9 @@ func (s *Server) handleCreateEnvironment(w http.ResponseWriter, r *http.Request)
 	orgID := GetOrgID(r.Context())
 
 	// ── Billing Gate ─────────────────────────────────────────────────────
-	// Check free tier limits and payment method before allowing env creation.
-	// Free tier: 20 hrs/mo, "small" only. After that, must add payment method.
+	// Check included monthly credits and payment method before allowing env creation.
+	// Organizations can use credits on any size. Once credits are exhausted, a payment
+	// method is required to continue creating environments.
 	if billingErr := s.billingService.CheckBillingAllowed(r.Context(), orgID, req.Size); billingErr != nil {
 		writeError(w, http.StatusPaymentRequired, billingErr.Error())
 		return
@@ -2703,6 +2713,20 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := s.taskService.StartTaskExecution(r.Context(), orgID, taskID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	go s.taskExecutor.ExecuteTask(context.Background(), orgID, taskID)
+
+	reloaded, reloadErr := s.taskService.GetTask(r.Context(), orgID, taskID)
+	if reloadErr == nil && reloaded != nil {
+		writeJSON(w, http.StatusOK, reloaded)
+		return
+	}
+
+	task.Status = "running"
 	writeJSON(w, http.StatusOK, task)
 }
 

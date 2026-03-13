@@ -39,20 +39,29 @@ type normalizedTrajectory struct {
 }
 
 func (s *TrajectoryAnalysisService) AnalyzeTask(ctx context.Context, orgID, taskID string) (*models.TrajectoryAnalysis, error) {
-	existing, err := s.GetLatestAnalysis(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		return existing, nil
-	}
-
 	traj, err := s.buildTrajectory(ctx, orgID, taskID)
 	if err != nil {
 		return nil, err
 	}
 	if traj == nil || traj.Task == nil {
 		return nil, nil
+	}
+	latestSessionID := ""
+	if len(traj.Sessions) > 0 {
+		latestSessionID = traj.Sessions[len(traj.Sessions)-1].ID
+	}
+
+	var existing *models.TrajectoryAnalysis
+	if latestSessionID != "" {
+		existing, err = s.GetAnalysisForSession(ctx, taskID, latestSessionID)
+	} else {
+		existing, err = s.GetLatestAnalysis(ctx, taskID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return existing, nil
 	}
 
 	analysis := s.heuristicAnalysis(traj)
@@ -79,9 +88,7 @@ func (s *TrajectoryAnalysisService) AnalyzeTask(ctx context.Context, orgID, task
 	analysis.TaskID = traj.Task.ID
 	analysis.SourceBranch = traj.Task.Branch
 	analysis.TrajectorySummary = firstNonEmpty(analysis.TrajectorySummary, traj.Summary, traj.Task.OutputSummary, traj.Task.Description, traj.Task.Title)
-	if len(traj.Sessions) > 0 {
-		analysis.SessionID = traj.Sessions[len(traj.Sessions)-1].ID
-	}
+	analysis.SessionID = latestSessionID
 
 	if err := s.upsertAnalysis(ctx, analysis); err != nil {
 		return nil, err
@@ -109,6 +116,30 @@ func (s *TrajectoryAnalysisService) GetLatestAnalysis(ctx context.Context, taskI
 	return analysis, err
 }
 
+func (s *TrajectoryAnalysisService) GetAnalysisForSession(ctx context.Context, taskID, sessionID string) (*models.TrajectoryAnalysis, error) {
+	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(sessionID) == "" {
+		return nil, nil
+	}
+
+	row := s.db.Pool.QueryRow(ctx, `
+		SELECT id, org_id, repo_full_name, task_id, COALESCE(session_id::text, ''), COALESCE(source_branch, ''),
+		       COALESCE(trajectory_summary, ''), COALESCE(outcome_class, ''), COALESCE(immediate_cause, ''),
+		       COALESCE(proximate_cause, ''), COALESCE(root_cause, ''), COALESCE(recovery_action, ''),
+		       COALESCE(recovery_reason, ''), COALESCE(inefficiency_pattern, ''), COALESCE(recommended_alternative, ''),
+		       subtask_analyses, COALESCE(analyzer_version, ''), COALESCE(model_name, ''), confidence,
+		       created_at, updated_at
+		FROM trajectory_analyses
+		WHERE task_id = $1 AND session_id = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, taskID, sessionID)
+	analysis, err := scanTrajectoryAnalysis(row)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return analysis, err
+}
+
 func (s *TrajectoryAnalysisService) buildTrajectory(ctx context.Context, orgID, taskID string) (*normalizedTrajectory, error) {
 	mem := &TrajectoryMemoryService{db: s.db, sessionService: s.sessionService}
 	task, err := mem.getTask(ctx, orgID, taskID)
@@ -119,10 +150,12 @@ func (s *TrajectoryAnalysisService) buildTrajectory(ctx context.Context, orgID, 
 	if err != nil {
 		return nil, err
 	}
+	logs = latestAttemptLogs(task, logs)
 	sessions, err := s.sessionService.ListSessionsByTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
+	sessions = latestAttemptSessions(task, logs, sessions)
 	sessionIDs := make([]string, 0, len(sessions))
 	var bundles []*models.ChangeBundle
 	for _, session := range sessions {

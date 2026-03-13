@@ -10,11 +10,11 @@ const setupSteps = [
   {
     num: '1',
     icon: Plug,
-    title: 'Connect your tools',
-    desc: 'Link your Linear workspace, add your Claude Code API key (or use our free tier), and connect a GitHub repo. Takes about 2 minutes.',
+    title: 'Connect your repo and AI key',
+    desc: 'Connect GitHub, pick the repo Gradient should remember, optionally connect Linear, and add your Anthropic API key. Gradient credits cover the platform layer; AI tokens stay transparent on your provider account.',
     visual: (
       <div className="flex items-center gap-3 mt-4">
-        {['Linear', 'Claude Code', 'GitHub'].map(tool => (
+        {['GitHub repo', 'Anthropic key', 'Optional Linear'].map(tool => (
           <div key={tool} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-xs font-medium text-primary">
             <Check className="h-3 w-3" /> {tool}
           </div>
@@ -25,8 +25,8 @@ const setupSteps = [
   {
     num: '2',
     icon: Tag,
-    title: 'Add issues in Linear with the gradient-agent label',
-    desc: 'Create issues in Linear like you normally would. Add the "gradient-agent" label to any issue you want the AI to pick up and work on.',
+    title: 'Start tasks from Linear or manually',
+    desc: 'Use the dashboard for manual tasks, or connect Linear and add the "gradient-agent" label to any issue you want Gradient to pick up automatically.',
     visual: (
       <div className="mt-4 rounded-lg border border-border bg-card/50 p-4 space-y-3">
         <div className="flex items-center gap-3">
@@ -123,15 +123,14 @@ export default function Landing() {
               </Badge>
 
               <h1 className="text-4xl font-bold tracking-tight text-foreground sm:text-5xl md:text-6xl">
-                Add a label in Linear.{' '}
+                Connect a repo.{' '}
                 <span className="bg-gradient-to-r from-primary to-emerald-400 bg-clip-text text-transparent">
-                  AI writes the code.
+                  AI keeps learning.
                 </span>
               </h1>
 
               <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed sm:text-xl">
-                Gradient watches your Linear issues for the <code className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-base font-semibold">gradient-agent</code> label,
-                spins up a cloud environment, writes the code, and opens a PR. You review, merge, and move on.
+                Gradient builds durable repo memory from every run, retrieves the right guidance for the next task, and turns issues or prompts into tested pull requests.
               </p>
 
               <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
@@ -167,7 +166,7 @@ export default function Landing() {
                 Three steps. That's it.
               </h2>
               <p className="mt-4 text-lg text-muted-foreground">
-                Set up once, then just label issues and let the agent handle the rest.
+                Repo first, optional Linear second, AI key third. After that, Gradient keeps getting smarter inside that repository.
               </p>
             </div>
 
@@ -222,7 +221,7 @@ export default function Landing() {
             {[
               { icon: Bot, title: 'Reads the issue', desc: 'Understands the requirements, context, and acceptance criteria from your Linear issue.' },
               { icon: GitBranch, title: 'Creates a branch', desc: 'Forks from your default branch and sets up a clean working environment.' },
-              { title: 'Writes & tests code', desc: 'Uses Claude Code (or our free-tier model) to implement the feature, fix, or refactor.', icon: Zap },
+              { title: 'Writes & tests code', desc: 'Uses Claude on your own Anthropic account while Gradient handles retrieval, memory persistence, and runtime orchestration.', icon: Zap },
               { title: 'Opens a PR', desc: 'Pushes the changes and opens a pull request linked back to the Linear issue.', icon: ArrowRight },
             ].map(item => (
               <div key={item.title} className="rounded-xl border border-border bg-card p-5 hover:border-primary/30 transition-colors">
@@ -244,27 +243,27 @@ export default function Landing() {
                 Simple pricing
               </h2>
               <p className="mt-4 text-lg text-muted-foreground">
-                Start free. No credit card required.
+                Transparent AI costs. Separate platform credits.
               </p>
             </div>
 
             <div className="grid gap-6 sm:grid-cols-2">
-              {/* Free tier */}
+              {/* Free trial */}
               <div className="rounded-xl border-2 border-primary/30 bg-gradient-to-b from-primary/5 to-transparent p-6">
-                <Badge className="mb-3">Free tier</Badge>
+                <Badge className="mb-3">Free trial</Badge>
                 <div className="flex items-baseline gap-1 mb-2">
                   <span className="text-4xl font-bold text-foreground">$0</span>
                   <span className="text-muted-foreground text-sm">/month</span>
                 </div>
                 <p className="text-sm text-muted-foreground mb-4">
-                  Perfect for trying Gradient or small projects.
+                  Try persistent memory, retrieval, and trajectory analysis without paying for the platform layer up front.
                 </p>
                 <ul className="space-y-2.5 text-sm text-muted-foreground">
                   {[
-                    'Free AI model (no API key needed)',
-                    '20 agent hours / month',
-                    'Unlimited Linear issues',
-                    'GitHub PR creation',
+                    '$10 of Gradient credits each month',
+                    'Bring your own Anthropic key',
+                    'Repo memory + trajectory analysis',
+                    'Manual tasks and optional Linear automation',
                   ].map(item => (
                     <li key={item} className="flex items-start gap-2">
                       <Check className="h-4 w-4 text-primary shrink-0 mt-0.5" /> {item}
@@ -273,22 +272,22 @@ export default function Landing() {
                 </ul>
               </div>
 
-              {/* Pro tier */}
+              {/* Usage tier */}
               <div className="rounded-xl border border-border bg-card p-6">
-                <Badge variant="secondary" className="mb-3">Pro</Badge>
+                <Badge variant="secondary" className="mb-3">Usage-based</Badge>
                 <div className="flex items-baseline gap-1 mb-2">
-                  <span className="text-4xl font-bold text-foreground">$49</span>
-                  <span className="text-muted-foreground text-sm">/month</span>
+                  <span className="text-4xl font-bold text-foreground">$3</span>
+                  <span className="text-muted-foreground text-sm">/1,000 Gradient Credits</span>
                 </div>
                 <p className="text-sm text-muted-foreground mb-4">
-                  For teams shipping fast with their own API keys.
+                  Pay only for Gradient's platform layer. Anthropic or OpenAI usage is billed directly by those providers.
                 </p>
                 <ul className="space-y-2.5 text-sm text-muted-foreground">
                   {[
-                    'Bring your own Claude Code API key',
-                    'Unlimited agent hours',
-                    'Priority queue',
-                    'Custom environment sizes',
+                    'BYO Anthropic and OpenAI keys',
+                    'Persistent memory and retrieval metered separately from tokens',
+                    'Supports small-equivalent Gradient Credits',
+                    'Enterprise storage and support can be layered on later',
                   ].map(item => (
                     <li key={item} className="flex items-start gap-2">
                       <Check className="h-4 w-4 text-primary shrink-0 mt-0.5" /> {item}
@@ -340,7 +339,7 @@ export default function Landing() {
                 <span className="font-bold text-foreground">Gradient</span>
               </div>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                AI agent that turns Linear issues into pull requests.
+                Repo-native AI memory that turns issues and prompts into pull requests.
               </p>
             </div>
             <div>
@@ -363,7 +362,7 @@ export default function Landing() {
           <Separator className="my-8" />
           <div className="flex flex-col items-center justify-between gap-4 sm:flex-row text-xs text-muted-foreground">
             <p>&copy; {new Date().getFullYear()} Gradient. All rights reserved.</p>
-            <p>Free tier available &middot; No credit card required</p>
+            <p>Included monthly credits &middot; No credit card required</p>
           </div>
         </div>
       </footer>

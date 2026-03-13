@@ -240,28 +240,37 @@ type OrgSettings struct {
 
 // BillingStatus is the computed billing status for an org (returned by billing status API)
 type BillingStatus struct {
-	OrgID            string   `json:"org_id"`
-	Tier             string   `json:"tier"`               // "free" or "paid"
-	HasPaymentMethod bool     `json:"has_payment_method"` // Stripe customer + subscription exists
-	StripeConfigured bool     `json:"stripe_configured"`  // whether Stripe is configured on the server
-	FreeHoursUsed    float64  `json:"free_hours_used"`    // hours used this month (free tier)
-	FreeHoursLimit   float64  `json:"free_hours_limit"`   // 20.0
-	FreeHoursLeft    float64  `json:"free_hours_left"`    // remaining free hours
-	CanCreateEnv     bool     `json:"can_create_env"`     // whether the org can create a new environment
-	AllowedSizes     []string `json:"allowed_sizes"`      // sizes the org can use
-	Month            string   `json:"month"`
+	OrgID              string   `json:"org_id"`
+	Tier               string   `json:"tier"`               // "free" or "paid"
+	HasPaymentMethod   bool     `json:"has_payment_method"` // Stripe customer + subscription exists
+	StripeConfigured   bool     `json:"stripe_configured"`  // whether Stripe is configured on the server
+	FreeHoursUsed      float64  `json:"free_hours_used"`    // legacy compatibility field
+	FreeHoursLimit     float64  `json:"free_hours_limit"`   // legacy compatibility field
+	FreeHoursLeft      float64  `json:"free_hours_left"`    // legacy compatibility field
+	FreeCreditsUsed    int64    `json:"free_credits_used"`
+	FreeCreditsLimit   int64    `json:"free_credits_limit"`
+	FreeCreditsLeft    int64    `json:"free_credits_left"`
+	FreeTrialValueUSD  float64  `json:"free_trial_value_usd"`
+	EstimatedCostUSD   float64  `json:"estimated_cost_usd"`
+	CanCreateEnv       bool     `json:"can_create_env"` // whether the org can create a new environment
+	AllowedSizes       []string `json:"allowed_sizes"`  // sizes the org can use
+	Month              string   `json:"month"`
 }
 
 // UsageSummary is a computed billing summary
 type UsageSummary struct {
-	OrgID       string  `json:"org_id"`
-	Month       string  `json:"month"`
-	TotalHours  float64 `json:"total_hours"`
-	TotalCost   float64 `json:"total_cost"`
-	SmallHours  float64 `json:"small_hours"`
-	MediumHours float64 `json:"medium_hours"`
-	LargeHours  float64 `json:"large_hours"`
-	GPUHours    float64 `json:"gpu_hours"`
+	OrgID            string  `json:"org_id"`
+	Month            string  `json:"month"`
+	TotalHours       float64 `json:"total_hours"`
+	TotalCost        float64 `json:"total_cost"`
+	SmallHours       float64 `json:"small_hours"`
+	MediumHours      float64 `json:"medium_hours"`
+	LargeHours       float64 `json:"large_hours"`
+	GPUHours         float64 `json:"gpu_hours"`
+	TotalCredits     int64   `json:"total_credits"`
+	IncludedCredits  int64   `json:"included_credits"`
+	BillableCredits  int64   `json:"billable_credits"`
+	IncludedValueUSD float64 `json:"included_value_usd"`
 }
 
 // SecretSync represents secret synchronization metadata

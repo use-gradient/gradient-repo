@@ -88,6 +88,12 @@ export const api = {
     delete: (token: string, orgId: string, branch: string) => request<any>('DELETE', `/contexts/${encodeURIComponent(branch)}`, undefined, token, orgId),
   },
 
+  // ── Memory ──
+  memory: {
+    overview: (token: string, orgId: string, repoFullName: string, limit = 12) =>
+      request<any>('GET', `/memory/overview?${new URLSearchParams({ repo_full_name: repoFullName, limit: String(limit) }).toString()}`, undefined, token, orgId),
+  },
+
   // ── Events ──
   events: {
     list:    async (token: string, orgId: string, params?: Record<string, string>) => {

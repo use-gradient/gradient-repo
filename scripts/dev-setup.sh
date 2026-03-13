@@ -68,10 +68,11 @@ JWT_SECRET=
 # Billing goes through Stripe for all tiers. Without this, env creation is blocked.
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
-STRIPE_PRICE_SMALL_ID=
-STRIPE_PRICE_MEDIUM_ID=
-STRIPE_PRICE_LARGE_ID=
-STRIPE_PRICE_GPU_ID=
+STRIPE_PRICE_CREDITS_ID=
+STRIPE_CREDIT_METER_EVENT_NAME=gradient_credits
+STRIPE_CREDIT_METER_CUSTOMER_KEY=stripe_customer_id
+STRIPE_CREDIT_METER_VALUE_KEY=credits
+FREE_TRIAL_CREDIT_USD=10
 
 # Hetzner — environments won't provision, but API + CLI + tests work
 HETZNER_API_TOKEN=
@@ -118,6 +119,18 @@ EOF
   info ".env created ✓"
 else
   info ".env already exists ✓"
+fi
+
+# Ensure the credits-based Stripe billing vars exist on older local .env files.
+if ! grep -q "^STRIPE_PRICE_CREDITS_ID=" .env 2>/dev/null; then
+  cat >> .env <<'EOF'
+STRIPE_PRICE_CREDITS_ID=
+STRIPE_CREDIT_METER_EVENT_NAME=gradient_credits
+STRIPE_CREDIT_METER_CUSTOMER_KEY=stripe_customer_id
+STRIPE_CREDIT_METER_VALUE_KEY=credits
+FREE_TRIAL_CREDIT_USD=10
+EOF
+  info "Added credits billing env vars to existing .env ✓"
 fi
 
 # ── 3. Start Postgres + NATS + Vault ─────────────────────────────────
@@ -192,18 +205,18 @@ else
   fi
 fi
 
-# ── 4. Stripe setup (products, prices, webhook) ─────────────────────
-# Only runs if STRIPE_SECRET_KEY is set and price IDs are still TODO/empty
+# ── 4. Stripe setup (credits price, meter, webhook) ─────────────────
+# Only runs if STRIPE_SECRET_KEY is set and the credits price is still TODO/empty.
 # NOTE: We read vars with grep+cut instead of `source .env` because the SSH private key
 # contains characters that break shell sourcing.
 STRIPE_SECRET_KEY=$(grep "^STRIPE_SECRET_KEY=" .env 2>/dev/null | cut -d= -f2-)
 
-if [ -n "$STRIPE_SECRET_KEY" ] && grep -q "TODO_CREATE_METERED_PRODUCT\|^STRIPE_PRICE_SMALL_ID=$" .env 2>/dev/null; then
-  info "Setting up Stripe products and prices..."
+if [ -n "$STRIPE_SECRET_KEY" ] && grep -q "TODO_CREATE_CREDITS_PRODUCT\|^STRIPE_PRICE_CREDITS_ID=$" .env 2>/dev/null; then
+  info "Setting up Stripe credits meter and price..."
 
-  # Helper: create billing meter + product + price linked to meter
-  # Stripe 2025+ requires Billing Meters for metered/usage-based prices.
-  create_stripe_metered_price() {
+  # Helper: create billing meter + credits product + usage-based price.
+  # The price is modeled as $3 / 1000 credits on a monthly meter.
+  create_stripe_credits_price() {
     local product_name="$1" unit_amount="$2" meter_event="$3" meter_display="$4"
 
     # Step 1: Create Billing Meter
@@ -248,6 +261,8 @@ if [ -n "$STRIPE_SECRET_KEY" ] && grep -q "TODO_CREATE_METERED_PRODUCT\|^STRIPE_
       -d "recurring[interval]=month" \
       -d "recurring[usage_type]=metered" \
       -d "recurring[meter]=$meter_id" \
+      -d "transform_quantity[divide_by]=1000" \
+      -d "transform_quantity[round]=up" \
       -d "billing_scheme=per_unit")
 
     local price_id
@@ -256,48 +271,17 @@ if [ -n "$STRIPE_SECRET_KEY" ] && grep -q "TODO_CREATE_METERED_PRODUCT\|^STRIPE_
     echo "$price_id"
   }
 
-  SMALL_PRICE=$(create_stripe_metered_price 'Gradient Small Env' 15 'gradient_small_hours' 'Small Env Hours')
-  MEDIUM_PRICE=$(create_stripe_metered_price 'Gradient Medium Env' 35 'gradient_medium_hours' 'Medium Env Hours')
-  LARGE_PRICE=$(create_stripe_metered_price 'Gradient Large Env' 70 'gradient_large_hours' 'Large Env Hours')
-  GPU_PRICE=$(create_stripe_metered_price 'Gradient GPU Env' 350 'gradient_gpu_hours' 'GPU Env Hours')
+  CREDITS_PRICE=$(create_stripe_credits_price 'Gradient Credits' 300 'gradient_credits' 'Gradient Credits')
 
-  if [ -n "$SMALL_PRICE" ] && [ -n "$MEDIUM_PRICE" ] && [ -n "$LARGE_PRICE" ]; then
-    # Write price IDs to .env
+  if [ -n "$CREDITS_PRICE" ]; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
-      sed -i '' "s|^STRIPE_PRICE_SMALL_ID=.*|STRIPE_PRICE_SMALL_ID=$SMALL_PRICE|" .env
-      sed -i '' "s|^STRIPE_PRICE_MEDIUM_ID=.*|STRIPE_PRICE_MEDIUM_ID=$MEDIUM_PRICE|" .env
-      sed -i '' "s|^STRIPE_PRICE_LARGE_ID=.*|STRIPE_PRICE_LARGE_ID=$LARGE_PRICE|" .env
-      if [ -n "$GPU_PRICE" ]; then
-        # Add STRIPE_PRICE_GPU_ID if not present, or update it
-        if grep -q "^STRIPE_PRICE_GPU_ID=" .env; then
-          sed -i '' "s|^STRIPE_PRICE_GPU_ID=.*|STRIPE_PRICE_GPU_ID=$GPU_PRICE|" .env
-        else
-          sed -i '' "/^STRIPE_PRICE_LARGE_ID=/a\\
-STRIPE_PRICE_GPU_ID=$GPU_PRICE" .env
-        fi
-      fi
+      sed -i '' "s|^STRIPE_PRICE_CREDITS_ID=.*|STRIPE_PRICE_CREDITS_ID=$CREDITS_PRICE|" .env
     else
-      sed -i "s|^STRIPE_PRICE_SMALL_ID=.*|STRIPE_PRICE_SMALL_ID=$SMALL_PRICE|" .env
-      sed -i "s|^STRIPE_PRICE_MEDIUM_ID=.*|STRIPE_PRICE_MEDIUM_ID=$MEDIUM_PRICE|" .env
-      sed -i "s|^STRIPE_PRICE_LARGE_ID=.*|STRIPE_PRICE_LARGE_ID=$LARGE_PRICE|" .env
-      if [ -n "$GPU_PRICE" ]; then
-        if grep -q "^STRIPE_PRICE_GPU_ID=" .env; then
-          sed -i "s|^STRIPE_PRICE_GPU_ID=.*|STRIPE_PRICE_GPU_ID=$GPU_PRICE|" .env
-        else
-          sed -i "/^STRIPE_PRICE_LARGE_ID=/a STRIPE_PRICE_GPU_ID=$GPU_PRICE" .env
-        fi
-      fi
+      sed -i "s|^STRIPE_PRICE_CREDITS_ID=.*|STRIPE_PRICE_CREDITS_ID=$CREDITS_PRICE|" .env
     fi
-    info "  Small:  $SMALL_PRICE ✓"
-    info "  Medium: $MEDIUM_PRICE ✓"
-    info "  Large:  $LARGE_PRICE ✓"
-    if [ -n "$GPU_PRICE" ]; then
-      info "  GPU:    $GPU_PRICE ✓"
-    else
-      warn "  GPU price creation failed — check Stripe"
-    fi
+    info "  Credits price: $CREDITS_PRICE ✓"
   else
-    warn "  Failed to create Stripe products — check STRIPE_SECRET_KEY"
+    warn "  Failed to create Stripe credits product — check STRIPE_SECRET_KEY"
   fi
 
   # Webhook: For local dev, Stripe CLI handles this (can't create localhost webhooks via API).

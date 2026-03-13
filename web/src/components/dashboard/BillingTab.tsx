@@ -4,7 +4,7 @@ import { api } from '@/api/client'
 import { useFetch, useMutation } from '@/hooks/useAPI'
 import { cn, formatCurrency, formatDate, SIZE_LABELS } from '@/lib/utils'
 import {
-  Button, Card, Badge, EmptyState, Modal, ProgressBar,
+  Button, Card, Badge, Modal, ProgressBar,
   Table, TableRow, TableCell, Skeleton, useToast, CodeBlock, Callout,
 } from '@/components/ui'
 import {
@@ -13,16 +13,17 @@ import {
   BarChart3, Settings,
 } from 'lucide-react'
 
-/* ─── Free Hours Ring ─── */
-function FreeHoursRing({ used, total }: { used: number; total: number }) {
-  const pct = Math.min(100, (used / total) * 100)
+/* ─── Free Trial Ring ─── */
+function FreeTrialRing({ used, total, includedUSD }: { used: number; total: number; includedUSD: number }) {
+  const safeTotal = total > 0 ? total : 1
+  const pct = Math.min(100, (used / safeTotal) * 100)
   const remaining = Math.max(0, total - used)
   const circumference = 2 * Math.PI * 54
 
   return (
     <div className="flex items-center gap-6">
       <div className="relative w-32 h-32 shrink-0">
-        <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90" aria-label={`${used.toFixed(1)} of ${total} free hours used`}>
+        <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90" aria-label={`${used.toFixed(0)} of ${total} free credits used`}>
           <circle cx="60" cy="60" r="54" fill="none" stroke="hsl(var(--secondary))" strokeWidth="8" />
           <circle
             cx="60" cy="60" r="54" fill="none"
@@ -34,16 +35,16 @@ function FreeHoursRing({ used, total }: { used: number; total: number }) {
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-xl font-bold text-foreground">{used.toFixed(1)}</span>
-          <span className="text-[10px] text-muted-foreground">/ {total} hrs</span>
+          <span className="text-xl font-bold text-foreground">{used.toFixed(0)}</span>
+          <span className="text-[10px] text-muted-foreground">/ {total} credits</span>
         </div>
       </div>
       <div>
-        <p className="text-sm font-medium text-foreground">{remaining.toFixed(1)} hours remaining</p>
+        <p className="text-sm font-medium text-foreground">{remaining.toFixed(0)} credits remaining</p>
         <p className="text-xs text-muted-foreground mt-1">
           {pct >= 90 ? 'Almost at limit — add payment to continue' :
-           pct >= 70 ? 'Getting close to your free tier limit' :
-           'Free tier resets monthly'}
+           pct >= 70 ? 'Getting close to your included monthly credits' :
+           `Includes ${formatCurrency(includedUSD)} of credits each month`}
         </p>
         <ProgressBar
           value={used}
@@ -59,8 +60,6 @@ function FreeHoursRing({ used, total }: { used: number; total: number }) {
 /* ─── Size Card ─── */
 function SizeCard({ sizeKey, hours, allowed }: { sizeKey: string; hours: number; allowed: boolean }) {
   const info = SIZE_LABELS[sizeKey] || { label: sizeKey, rate: '$0', specs: '' }
-  const rates: Record<string, number> = { small: 0.15, medium: 0.35, large: 0.70, gpu: 3.50 }
-  const cost = hours * (rates[sizeKey] || 0)
 
   return (
     <Card className={cn('p-4', !allowed && 'opacity-50')}>
@@ -69,8 +68,7 @@ function SizeCard({ sizeKey, hours, allowed }: { sizeKey: string; hours: number;
         {allowed ? <Unlock className="w-3 h-3 text-primary" /> : <Lock className="w-3 h-3 text-muted-foreground" />}
       </div>
       <p className="text-xl font-bold text-foreground">{hours.toFixed(2)}<span className="text-xs text-muted-foreground font-normal ml-1">hrs</span></p>
-      <p className="text-xs text-muted-foreground mt-1">{formatCurrency(cost)}</p>
-      <p className="text-[10px] text-muted-foreground">{info.specs} · {info.rate}</p>
+      <p className="text-[10px] text-muted-foreground mt-1">{info.specs}</p>
     </Card>
   )
 }
@@ -127,7 +125,7 @@ function BillingSetupModal({ open, onClose, onSetup }: { open: boolean; onClose:
     }>
       <div className="space-y-4">
         <Callout variant="tip">
-          Setting up billing unlocks all environment sizes and removes the 20-hour free tier limit.
+          Setting up billing lets your org continue after the included monthly trial credits are exhausted. Anthropic and OpenAI token charges still stay on those provider accounts.
         </Callout>
         <div className="rounded-md border border-border bg-secondary/50 p-4 space-y-3">
           <div className="flex items-center justify-between">
@@ -231,19 +229,23 @@ export default function BillingTab() {
 
   const isPaid = status?.tier === 'paid' || status?.billing_tier === 'paid'
   const hasPayment = status?.has_payment_method === true
-  const freeUsed = status?.free_hours_used || 0
-  const freeTotal = 20
-  const allowedSizes = status?.allowed_sizes || ['small']
+  const freeUsed = status?.free_credits_used || 0
+  const freeTotal = status?.free_credits_limit || 0
+  const freeValue = status?.free_trial_value_usd || 10
+  const allowedSizes = status?.allowed_sizes || ['small', 'medium', 'large', 'gpu']
 
   const chartData = usage ? [
-    { name: 'Small', hours: usage.small_hours || 0, cost: (usage.small_hours || 0) * 0.15 },
-    { name: 'Medium', hours: usage.medium_hours || 0, cost: (usage.medium_hours || 0) * 0.35 },
-    { name: 'Large', hours: usage.large_hours || 0, cost: (usage.large_hours || 0) * 0.70 },
-    { name: 'GPU', hours: usage.gpu_hours || 0, cost: (usage.gpu_hours || 0) * 3.50 },
+    { name: 'Small', hours: usage.small_hours || 0 },
+    { name: 'Medium', hours: usage.medium_hours || 0 },
+    { name: 'Large', hours: usage.large_hours || 0 },
+    { name: 'GPU', hours: usage.gpu_hours || 0 },
   ] : []
 
   const totalHours = chartData.reduce((acc, d) => acc + d.hours, 0)
-  const totalCost = chartData.reduce((acc, d) => acc + d.cost, 0)
+  const totalCost = usage?.total_cost || 0
+  const totalCredits = usage?.total_credits || 0
+  const includedCredits = usage?.included_credits || 0
+  const billableCredits = usage?.billable_credits || 0
 
   if (statusLoading) {
     return (
@@ -315,7 +317,7 @@ export default function BillingTab() {
             <div>
               <h3 className="text-sm font-semibold text-foreground mb-1 flex items-center gap-2"><Zap className="w-4 h-4 text-primary" /> Unlock the full platform</h3>
               <p className="text-xs text-muted-foreground max-w-md">
-                Free tier: 20 hrs/month, Starter instances only. Add a payment method to unlock Standard, Pro, and GPU environments with per-second billing.
+                Included trial: {formatCurrency(freeValue)} of credits every month. Add a payment method so usage keeps flowing after the included credits are exhausted.
               </p>
             </div>
             <Button size="sm" onClick={() => setShowSetup(true)}>
@@ -327,7 +329,7 @@ export default function BillingTab() {
 
       {!isPaid && (
         <Card className="p-6">
-          <FreeHoursRing used={freeUsed} total={freeTotal} />
+          <FreeTrialRing used={freeUsed} total={freeTotal} includedUSD={freeValue} />
         </Card>
       )}
 
@@ -339,7 +341,8 @@ export default function BillingTab() {
           </h3>
           <Card className="px-3 py-1.5 flex items-center gap-3">
             <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{totalHours.toFixed(2)} hrs</span>
-            <span className="text-xs text-primary font-medium flex items-center gap-1"><DollarSign className="w-3 h-3" />{formatCurrency(totalCost)}</span>
+            <span className="text-xs text-muted-foreground flex items-center gap-1"><Zap className="w-3 h-3" />{totalCredits} credits</span>
+          <span className="text-xs text-primary font-medium flex items-center gap-1"><DollarSign className="w-3 h-3" />{formatCurrency(totalCost)}</span>
           </Card>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -352,6 +355,9 @@ export default function BillingTab() {
             />
           ))}
         </div>
+        <p className="text-[11px] text-muted-foreground mt-3">
+          Included this month: {includedCredits} credits ({formatCurrency(freeValue)}). Billable after trial: {billableCredits} credits. Current billable usage: {formatCurrency(totalCost)}.
+        </p>
       </div>
 
       <Card className="p-5">
@@ -366,7 +372,7 @@ export default function BillingTab() {
               )}>
                 {allowed ? <Unlock className="w-4 h-4 mx-auto mb-1.5 text-primary" /> : <Lock className="w-4 h-4 mx-auto mb-1.5 text-muted-foreground" />}
                 <p className="text-xs font-medium text-foreground">{info.label}</p>
-                <p className="text-[10px] text-muted-foreground">{info.rate}</p>
+                <p className="text-[10px] text-muted-foreground">{allowed ? 'Available within credits' : 'Requires active billing'}</p>
               </div>
             )
           })}

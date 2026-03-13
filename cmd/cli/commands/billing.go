@@ -46,17 +46,15 @@ func NewBillingUsageCmd() *cobra.Command {
 
 			fmt.Printf("Usage Summary (%s)\n", result["month"])
 			fmt.Printf("─────────────────────────────────\n")
-			fmt.Printf("  Small hours:   %.2f  ($%.2f)\n",
-				toFloat(result["small_hours"]), toFloat(result["small_hours"])*0.15)
-			fmt.Printf("  Medium hours:  %.2f  ($%.2f)\n",
-				toFloat(result["medium_hours"]), toFloat(result["medium_hours"])*0.35)
-			fmt.Printf("  Large hours:   %.2f  ($%.2f)\n",
-				toFloat(result["large_hours"]), toFloat(result["large_hours"])*0.70)
-			fmt.Printf("  GPU hours:     %.2f  ($%.2f)\n",
-				toFloat(result["gpu_hours"]), toFloat(result["gpu_hours"])*3.50)
+			fmt.Printf("  Small hours:   %.2f\n", toFloat(result["small_hours"]))
+			fmt.Printf("  Medium hours:  %.2f\n", toFloat(result["medium_hours"]))
+			fmt.Printf("  Large hours:   %.2f\n", toFloat(result["large_hours"]))
+			fmt.Printf("  GPU hours:     %.2f\n", toFloat(result["gpu_hours"]))
 			fmt.Printf("─────────────────────────────────\n")
-			fmt.Printf("  Total:         %.2f hrs  $%.2f\n",
-				toFloat(result["total_hours"]), toFloat(result["total_cost"]))
+			fmt.Printf("  Total:         %.2f hrs\n", toFloat(result["total_hours"]))
+			fmt.Printf("  Credits:       %.0f total  %.0f billable  %.0f included\n",
+				toFloat(result["total_credits"]), toFloat(result["billable_credits"]), toFloat(result["included_credits"]))
+			fmt.Printf("  Estimated:     $%.2f\n", toFloat(result["total_cost"]))
 
 			return nil
 		},
@@ -191,16 +189,20 @@ func NewBillingStatusCmd() *cobra.Command {
 			}
 			fmt.Printf("  Payment Method: %s\n", paymentIcon)
 
-			// Free tier limits
+			// Trial limits
 			if tier == "free" || !hasPayment {
-				freeUsed := toFloat(status["free_hours_used"])
-				freeLimit := toFloat(status["free_hours_limit"])
-				freeLeft := toFloat(status["free_hours_left"])
+				freeUsed := int64(toFloat(status["free_credits_used"]))
+				freeLimit := int64(toFloat(status["free_credits_limit"]))
+				freeLeft := int64(toFloat(status["free_credits_left"]))
+				freeValue := toFloat(status["free_trial_value_usd"])
 
-				fmt.Printf("  Free Hours:     %.1f / %.0f used (%.1f remaining)\n", freeUsed, freeLimit, freeLeft)
+				fmt.Printf("  Trial Credits:  %d / %d used (%d remaining, $%.2f included)\n", freeUsed, freeLimit, freeLeft, freeValue)
 
 				// Progress bar
-				pct := freeUsed / freeLimit
+				pct := 0.0
+				if freeLimit > 0 {
+					pct = float64(freeUsed) / float64(freeLimit)
+				}
 				if pct > 1 {
 					pct = 1
 				}
@@ -234,7 +236,7 @@ func NewBillingStatusCmd() *cobra.Command {
 			if canCreate {
 				fmt.Printf("  ✓ You can create environments\n")
 			} else {
-				fmt.Printf("  ✗ Free tier exhausted — add a payment method:\n")
+				fmt.Printf("  ✗ Trial credits exhausted — add a payment method:\n")
 				fmt.Printf("    gc billing setup --email you@example.com --name \"Your Org\"\n")
 			}
 

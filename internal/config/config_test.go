@@ -93,9 +93,9 @@ func TestConfigFields(t *testing.T) {
 	// Verify all Stripe config fields can be loaded
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_123")
 	t.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_123")
-	t.Setenv("STRIPE_PRICE_SMALL_ID", "price_small")
-	t.Setenv("STRIPE_PRICE_MEDIUM_ID", "price_medium")
-	t.Setenv("STRIPE_PRICE_LARGE_ID", "price_large")
+	t.Setenv("STRIPE_PRICE_CREDITS_ID", "price_credits")
+	t.Setenv("STRIPE_CREDIT_METER_EVENT_NAME", "gradient_credits")
+	t.Setenv("FREE_TRIAL_CREDIT_USD", "10")
 
 	cfg := Load()
 
@@ -105,8 +105,14 @@ func TestConfigFields(t *testing.T) {
 	if cfg.StripeWebhookSecret != "whsec_123" {
 		t.Errorf("StripeWebhookSecret: got %q", cfg.StripeWebhookSecret)
 	}
-	if cfg.StripePriceSmallID != "price_small" {
-		t.Errorf("StripePriceSmallID: got %q", cfg.StripePriceSmallID)
+	if cfg.StripePriceCreditsID != "price_credits" {
+		t.Errorf("StripePriceCreditsID: got %q", cfg.StripePriceCreditsID)
+	}
+	if cfg.StripeCreditMeterEventName != "gradient_credits" {
+		t.Errorf("StripeCreditMeterEventName: got %q", cfg.StripeCreditMeterEventName)
+	}
+	if cfg.FreeTrialCreditUSD != 10 {
+		t.Errorf("FreeTrialCreditUSD: got %f", cfg.FreeTrialCreditUSD)
 	}
 }
 

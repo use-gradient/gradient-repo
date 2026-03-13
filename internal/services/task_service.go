@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -291,8 +292,21 @@ func (s *TaskService) RetryTask(ctx context.Context, orgID, taskID string) (*mod
 	}
 
 	_, err = s.db.Pool.Exec(ctx, `
-		UPDATE agent_tasks SET status = 'pending', error_message = '',
-			retry_count = retry_count + 1, updated_at = NOW()
+		UPDATE agent_tasks SET
+			status = 'pending',
+			error_message = '',
+			output_summary = '',
+			output_json = NULL,
+			commit_sha = '',
+			pr_url = '',
+			completed_at = NULL,
+			duration_seconds = 0,
+			tokens_used = 0,
+			estimated_cost = 0,
+			context_saved = false,
+			snapshot_taken = false,
+			retry_count = retry_count + 1,
+			updated_at = NOW()
 		WHERE id = $1 AND org_id = $2`,
 		taskID, orgID,
 	)
@@ -303,6 +317,17 @@ func (s *TaskService) RetryTask(ctx context.Context, orgID, taskID string) (*mod
 	s.addLog(ctx, taskID, "retried", "completed", fmt.Sprintf("Retry #%d", task.RetryCount+1), nil)
 	task.Status = "pending"
 	task.ErrorMessage = ""
+	task.OutputSummary = ""
+	task.OutputJSON = nil
+	task.CommitSHA = ""
+	task.PRURL = ""
+	task.CompletedAt = nil
+	task.DurationSeconds = 0
+	task.TokensUsed = 0
+	task.EstimatedCost = 0
+	task.ContextSaved = false
+	task.SnapshotTaken = false
+	task.RetryCount++
 	return task, nil
 }
 
@@ -371,13 +396,9 @@ func (s *TaskService) CompleteTask(ctx context.Context, orgID, taskID string, re
 	if task != nil && task.LinearIssueID != "" {
 		go func() {
 			bgCtx := context.Background()
-			summary := result.OutputSummary
-			if result.PRURL != "" {
-				summary += fmt.Sprintf("\n\nPR: %s", result.PRURL)
-			}
 			s.linearService.UpdateIssueState(bgCtx, orgID, task.LinearIssueID, "Done")
 			s.linearService.AddComment(bgCtx, orgID, task.LinearIssueID,
-				fmt.Sprintf("✅ Gradient agent completed this task.\n\n%s", summary))
+				buildLinearCompletionComment(result))
 		}()
 	}
 
@@ -394,6 +415,50 @@ type CompleteTaskRequest struct {
 	EstimatedCost float64                `json:"estimated_cost"`
 	ContextSaved  bool                   `json:"context_saved"`
 	SnapshotTaken bool                   `json:"snapshot_taken"`
+}
+
+func buildLinearCompletionComment(result CompleteTaskRequest) string {
+	var sb strings.Builder
+	sb.WriteString("✅ Gradient agent completed this task.\n\n")
+
+	if result.OutputSummary != "" {
+		sb.WriteString("## Summary\n\n")
+		sb.WriteString(result.OutputSummary)
+		sb.WriteString("\n\n")
+	}
+
+	if result.PRURL != "" {
+		sb.WriteString("## Pull Request\n\n")
+		sb.WriteString(result.PRURL)
+		sb.WriteString("\n\n")
+	}
+
+	if markdown := extractClaudeOutputMarkdown(result.OutputJSON); markdown != "" {
+		sb.WriteString("## Claude Output\n\n")
+		if len(markdown) > 12000 {
+			sb.WriteString(markdown[:12000])
+			sb.WriteString("\n\n_Claude output truncated for Linear. View the full markdown output in Gradient task details._\n")
+		} else {
+			sb.WriteString(markdown)
+			sb.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func extractClaudeOutputMarkdown(outputJSON map[string]interface{}) string {
+	if outputJSON == nil {
+		return ""
+	}
+	value, ok := outputJSON["claude_output_markdown"]
+	if !ok || value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func (s *TaskService) FailTask(ctx context.Context, orgID, taskID, errorMsg string) error {

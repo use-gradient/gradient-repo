@@ -24,6 +24,7 @@ import (
 type TaskExecutorService struct {
 	db             *db.DB
 	envService     *EnvService
+	billingService *BillingService
 	claudeService  *ClaudeService
 	taskService    *TaskService
 	githubService  *GitHubService
@@ -39,9 +40,17 @@ type TaskExecutorService struct {
 	maxConcurrent int
 }
 
+var gradientMCPAllowedTools = []string{
+	"mcp__gradient-context__get_context_updates",
+	"mcp__gradient-context__get_memory_guidance",
+	"mcp__gradient-context__publish_event",
+	"mcp__gradient-context__mark_subtask",
+}
+
 func NewTaskExecutorService(
 	database *db.DB,
 	envService *EnvService,
+	billingService *BillingService,
 	claudeService *ClaudeService,
 	taskService *TaskService,
 	githubService *GitHubService,
@@ -55,6 +64,7 @@ func NewTaskExecutorService(
 	return &TaskExecutorService{
 		db:             database,
 		envService:     envService,
+		billingService: billingService,
 		claudeService:  claudeService,
 		taskService:    taskService,
 		githubService:  githubService,
@@ -108,6 +118,10 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		if baseBranch == "" {
 			baseBranch = "main"
 		}
+	}
+	envSize := strings.TrimSpace(settings.DefaultEnvSize)
+	if envSize == "" {
+		envSize = "small"
 	}
 
 	var (
@@ -197,11 +211,25 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 	if task.RepoFullName != "" {
 		existing, _ := e.envService.GetByOrgRepoAndBranch(ctx, orgID, task.RepoFullName, baseBranch)
 		if existing != nil && existing.Status == "sleeping" {
+			if existing.Size != "" {
+				envSize = existing.Size
+			}
+			if e.billingService != nil {
+				if billingErr := e.billingService.CheckBillingAllowed(ctx, orgID, envSize); billingErr != nil {
+					failExecution(fmt.Sprintf("Billing blocked task execution: %v", billingErr))
+					return
+				}
+			}
 			e.taskService.addLog(ctx, taskID, "env_waking", "started",
 				fmt.Sprintf("Waking sleeping environment %s", existing.ID), nil)
 			if wakeErr := e.envService.WakeEnvironment(ctx, existing.ID, orgID); wakeErr == nil {
 				newEnv = existing
 				reusedEnv = true
+				if e.billingService != nil {
+					if trackErr := e.billingService.TrackUsageStart(ctx, existing.ID, orgID, envSize); trackErr != nil {
+						log.Printf("[billing] failed to track usage start for task env wake %s: %v", existing.ID, trackErr)
+					}
+				}
 			} else {
 				log.Printf("[executor] Failed to wake env %s: %v, creating new", existing.ID, wakeErr)
 			}
@@ -209,6 +237,12 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 	}
 
 	if newEnv == nil {
+		if e.billingService != nil {
+			if billingErr := e.billingService.CheckBillingAllowed(ctx, orgID, envSize); billingErr != nil {
+				failExecution(fmt.Sprintf("Billing blocked task execution: %v", billingErr))
+				return
+			}
+		}
 		var snapshotRef string
 		if snap, snapErr := e.snapshotStore.GetLatestByBranch(ctx, orgID, baseBranch); snapErr == nil && snap != nil {
 			snapshotRef = snap.ImageRef
@@ -229,9 +263,17 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 			failExecution(fmt.Sprintf("Failed to provision environment: %v", createErr))
 			return
 		}
+		if newEnv.Size != "" {
+			envSize = newEnv.Size
+		}
+		if e.billingService != nil {
+			if trackErr := e.billingService.TrackUsageStart(ctx, newEnv.ID, orgID, envSize); trackErr != nil {
+				log.Printf("[billing] failed to track usage start for task env create %s: %v", newEnv.ID, trackErr)
+			}
+		}
 
 		e.taskService.addLog(ctx, taskID, "env_provisioned", "completed",
-			fmt.Sprintf("Environment %s created (%s/%s)", newEnv.ID, settings.DefaultEnvProvider, settings.DefaultEnvSize), nil)
+			fmt.Sprintf("Environment %s created (%s/%s)", newEnv.ID, settings.DefaultEnvProvider, envSize), nil)
 	}
 
 	e.db.Pool.Exec(ctx, `UPDATE agent_tasks SET environment_id = $1, branch = $2, updated_at = NOW() WHERE id = $3`,
@@ -708,29 +750,23 @@ echo "MCP_SETUP_OK"`
 		workDir = "/workspace/repo"
 	}
 	turnsPerIter := claudeCfg.MaxTurns
-	if turnsPerIter > 15 {
-		turnsPerIter = 15
-	}
-	maxIter := (claudeCfg.MaxTurns + turnsPerIter - 1) / turnsPerIter
-	if maxIter < 1 {
-		maxIter = 1
-	}
-	if maxIter > 10 {
-		maxIter = 10
+	if turnsPerIter < 1 {
+		turnsPerIter = 1
 	}
 	mcpFlagStr := ""
 	if mcpReady {
 		mcpFlagStr = "--mcp-config /gradient/mcp-config.json "
 	}
+	effectiveAllowedTools := allowedToolsForExecution(claudeCfg, mcpReady)
 	redactedCmd := fmt.Sprintf(
-		`export ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose [context-aware loop: up to %d iterations]`,
-		workDir, claudeCfg.Model, turnsPerIter, strings.Join(claudeCfg.AllowedTools, ","), mcpFlagStr, maxIter)
+		`export ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose`,
+		workDir, claudeCfg.Model, turnsPerIter, strings.Join(effectiveAllowedTools, ","), mcpFlagStr)
 	e.taskService.addLog(ctx, taskID, "claude_invocation", "started", redactedCmd, map[string]interface{}{
 		"model":               claudeCfg.Model,
 		"max_turns_total":     claudeCfg.MaxTurns,
 		"turns_per_iteration": turnsPerIter,
-		"max_iterations":      maxIter,
-		"allowed_tools":       claudeCfg.AllowedTools,
+		"max_iterations":      1,
+		"allowed_tools":       effectiveAllowedTools,
 		"mcp_enabled":         mcpReady,
 		"work_dir":            workDir,
 		"repo_cloned":         repoCloned,
@@ -748,6 +784,35 @@ echo "MCP_SETUP_OK"`
 		"truncated":    len(claudeOutput) > 10000,
 		"had_error":    claudeErr != nil,
 	})
+	if fatalClaudeError := detectClaudeFatalError(claudeOutput, claudeErr); fatalClaudeError != "" {
+		e.taskService.addLog(ctx, taskID, "claude_failed", "failed", fatalClaudeError, map[string]interface{}{
+			"output_bytes": len(claudeOutput),
+			"had_error":    claudeErr != nil,
+		})
+		recordBundle("claude_failed", "failed", fatalClaudeError, map[string]interface{}{
+			"output_bytes": len(claudeOutput),
+			"had_error":    claudeErr != nil,
+			"mcp_enabled":  mcpReady,
+		}, map[string]interface{}{
+			"outcome":           "failed",
+			"subtask":           "claude_execution",
+			"summary":           fatalClaudeError,
+			"failure_signature": normalizedKey(fatalClaudeError),
+		}, nil)
+		failExecution(fatalClaudeError)
+		if task.RepoFullName != "" {
+			if err := e.envService.SleepEnvironment(ctx, newEnv.ID, orgID); err != nil {
+				log.Printf("[executor] Failed to sleep env %s after task failure: %v", newEnv.ID, err)
+			} else if e.billingService != nil {
+				if trackErr := e.billingService.TrackUsageStop(ctx, newEnv.ID); trackErr != nil {
+					log.Printf("[billing] failed to track usage stop after task failure for env %s: %v", newEnv.ID, trackErr)
+				}
+			}
+		} else if settings.AutoDestroyEnv {
+			e.cleanupEnv(orgID, newEnv.ID)
+		}
+		return
+	}
 	e.taskService.addLog(ctx, taskID, "claude_done", "completed",
 		fmt.Sprintf("Claude Code finished (%d bytes output)", len(claudeOutput)), nil)
 	recordBundle("claude_done", "completed", "Claude execution finished", map[string]interface{}{
@@ -869,9 +934,15 @@ echo "MCP_SETUP_OK"`
 	}
 
 	outputSummary := e.extractSummary(claudeOutput)
+	outputJSON := map[string]interface{}{
+		"claude_output_markdown":  truncate(claudeOutput, 50000),
+		"claude_output_bytes":     len(claudeOutput),
+		"claude_output_truncated": len(claudeOutput) > 50000,
+	}
 
 	e.taskService.CompleteTask(ctx, orgID, taskID, CompleteTaskRequest{
 		OutputSummary: outputSummary,
+		OutputJSON:    outputJSON,
 		CommitSHA:     commitSHA,
 		PRURL:         prURL,
 		ContextSaved:  contextSaved,
@@ -907,6 +978,11 @@ echo "MCP_SETUP_OK"`
 			log.Printf("[executor] Failed to sleep env %s after task: %v", newEnv.ID, err)
 		} else {
 			log.Printf("[executor] Environment %s put to sleep after task completion", newEnv.ID)
+			if e.billingService != nil {
+				if trackErr := e.billingService.TrackUsageStop(ctx, newEnv.ID); trackErr != nil {
+					log.Printf("[billing] failed to track usage stop after task completion for env %s: %v", newEnv.ID, trackErr)
+				}
+			}
 		}
 	} else if settings.AutoDestroyEnv {
 		e.cleanupEnv(orgID, newEnv.ID)
@@ -1049,50 +1125,26 @@ func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRep
 	if hasRepo {
 		workDir = "/workspace/repo"
 	}
-	tools := strings.Join(cfg.AllowedTools, ",")
+	tools := strings.Join(allowedToolsForExecution(cfg, mcpEnabled), ",")
 
 	mcpFlag := ""
 	if mcpEnabled {
 		mcpFlag = "--mcp-config /gradient/mcp-config.json "
 	}
 
-	turnsPerIteration := cfg.MaxTurns
-	if turnsPerIteration > 15 {
-		turnsPerIteration = 15
-	}
-	maxIterations := (cfg.MaxTurns + turnsPerIteration - 1) / turnsPerIteration
-	if maxIterations < 1 {
-		maxIterations = 1
-	}
-	if maxIterations > 10 {
-		maxIterations = 10
+	maxTurns := cfg.MaxTurns
+	if maxTurns < 1 {
+		maxTurns = 1
 	}
 
 	return fmt.Sprintf(`export ANTHROPIC_API_KEY="%s" && cd %s
 
-# Initial run
 claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1
-
-ITER=1
-MAX_ITER=%d
-FLAG="/gradient/context/has_updates"
-
-while [ $ITER -lt $MAX_ITER ]; do
-  if [ ! -f "$FLAG" ]; then
-    break
-  fi
-  rm -f "$FLAG"
-  echo "[gradient] Context update detected (iteration $((ITER+1))/$MAX_ITER), resuming..."
-  claude --resume -p "Operational updates are available. Call get_context_updates immediately, incorporate any critical peer changes, and continue from your current plan. If the update indicates a new failure mode, call get_memory_guidance before retrying." --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1
-  ITER=$((ITER+1))
-done
-
-echo "[gradient] Claude execution complete after $((ITER)) iteration(s)"
-exit 0`,
+STATUS=$?
+echo "[gradient] Claude execution complete after 1 iteration(s)"
+exit $STATUS`,
 		cfg.AnthropicAPIKey, workDir,
-		cfg.Model, turnsPerIteration, tools, mcpFlag,
-		maxIterations,
-		cfg.Model, turnsPerIteration, tools, mcpFlag,
+		cfg.Model, maxTurns, tools, mcpFlag,
 	)
 }
 
@@ -1205,6 +1257,11 @@ func (e *TaskExecutorService) failTask(ctx context.Context, orgID, taskID, msg s
 }
 
 func (e *TaskExecutorService) cleanupEnv(orgID, envID string) {
+	if e.billingService != nil {
+		if err := e.billingService.TrackUsageStop(context.Background(), envID); err != nil {
+			log.Printf("[billing] failed to track usage stop during cleanup for env %s: %v", envID, err)
+		}
+	}
 	if err := e.envService.DestroyEnvironment(context.Background(), envID, orgID); err != nil {
 		log.Printf("[executor] cleanup failed for env %s: %v", envID, err)
 	}
@@ -1215,6 +1272,76 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func detectClaudeFatalError(output string, execErr error) string {
+	text := strings.TrimSpace(output)
+	lower := strings.ToLower(text)
+
+	fatalPatterns := []string{
+		"reached max turns",
+		"invalid api key",
+		"fix external api key",
+		"authentication failed",
+		"authentication error",
+		"unauthorized",
+		"forbidden",
+		"api key is invalid",
+		"missing api key",
+		"no valid session id",
+		"--resume requires a valid session id",
+		"need permission to access",
+		"permission to access the operational updates tool",
+		"grant permission for `mcp__gradient-context__get_context_updates`",
+		"grant permission for mcp__gradient-context__get_context_updates",
+	}
+
+	for _, pattern := range fatalPatterns {
+		if strings.Contains(lower, pattern) {
+			for _, line := range strings.Split(text, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" && strings.Contains(strings.ToLower(trimmed), pattern) {
+					return truncate(trimmed, 400)
+				}
+			}
+			return truncate(text, 400)
+		}
+	}
+
+	if execErr != nil {
+		if text != "" {
+			return truncate(text, 400)
+		}
+		return fmt.Sprintf("Claude Code execution failed: %v", execErr)
+	}
+
+	return ""
+}
+
+func allowedToolsForExecution(cfg *models.ClaudeConfig, mcpEnabled bool) []string {
+	ordered := make([]string, 0, len(cfg.AllowedTools)+len(gradientMCPAllowedTools))
+	seen := make(map[string]struct{})
+	for _, tool := range cfg.AllowedTools {
+		trimmed := strings.TrimSpace(tool)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		ordered = append(ordered, trimmed)
+	}
+	if mcpEnabled {
+		for _, tool := range gradientMCPAllowedTools {
+			if _, ok := seen[tool]; ok {
+				continue
+			}
+			seen[tool] = struct{}{}
+			ordered = append(ordered, tool)
+		}
+	}
+	return ordered
 }
 
 func shellQuote(s string) string {

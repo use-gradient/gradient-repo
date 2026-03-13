@@ -110,6 +110,52 @@ func (s *SessionService) ListSessionsByTask(ctx context.Context, taskID string) 
 	return sessions, nil
 }
 
+func (s *SessionService) ListRecentSessionsByRepo(ctx context.Context, orgID, repoFullName string, limit int) ([]*models.AgentSession, error) {
+	if orgID == "" || repoFullName == "" {
+		return []*models.AgentSession{}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT s.id, s.task_id, s.parent_session_id, s.org_id, s.agent_role, s.scope,
+		       s.initial_sha, s.branch_name, s.environment_id, s.status, s.contracts,
+		       s.created_at, s.completed_at
+		FROM agent_sessions s
+		INNER JOIN agent_tasks t ON t.id = s.task_id
+		WHERE s.org_id = $1 AND COALESCE(t.repo_full_name, '') = $2
+		ORDER BY s.created_at DESC
+		LIMIT $3
+	`, orgID, repoFullName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list repo sessions: %w", err)
+	}
+	defer rows.Close()
+
+	sessions := make([]*models.AgentSession, 0, limit)
+	for rows.Next() {
+		session := &models.AgentSession{}
+		var scopeJSON, contractsJSON []byte
+		err := rows.Scan(
+			&session.ID, &session.TaskID, &session.ParentSessionID, &session.OrgID,
+			&session.AgentRole, &scopeJSON, &session.InitialSHA, &session.BranchName,
+			&session.EnvironmentID, &session.Status, &contractsJSON,
+			&session.CreatedAt, &session.CompletedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		json.Unmarshal(scopeJSON, &session.Scope)
+		json.Unmarshal(contractsJSON, &session.Contracts)
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating repo sessions: %w", err)
+	}
+	return sessions, nil
+}
+
 func (s *SessionService) UpdateSessionStatus(ctx context.Context, id, status string) error {
 	_, err := s.db.Pool.Exec(ctx, `
 		UPDATE agent_sessions SET status = $2 WHERE id = $1`, id, status)

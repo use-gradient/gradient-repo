@@ -1,42 +1,65 @@
-import { useState, useCallback, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { api } from '@/api/client'
 import { useFetch, useMutation } from '@/hooks/useAPI'
 import { cn } from '@/lib/utils'
 import {
-  Button, Card, Input, Badge, useToast, Select, Skeleton,
+  Badge, Button, Callout, Card, Input, Select, Skeleton, useToast,
 } from '@/components/ui'
 import {
-  CheckCircle2, ArrowRight, ArrowLeft, Bot, Key, Plug,
-  GitBranch, Rocket, Tag, ExternalLink, PartyPopper,
-  Github,
+  ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, FolderGit2, Github, KeyRound,
+  Link2, Plug, Rocket, Sparkles,
 } from 'lucide-react'
 
 const STEPS = [
-  { id: 'linear', label: 'Connect Linear', icon: Plug, description: 'Link your Linear workspace' },
-  { id: 'claude', label: 'AI Model', icon: Bot, description: 'Choose your AI model' },
-  { id: 'repo', label: 'Connect Repo', icon: GitBranch, description: 'Link a GitHub repository' },
-  { id: 'launch', label: 'Start Building', icon: Tag, description: 'Label issues and watch the magic' },
+  {
+    id: 'repo',
+    label: 'Connect repo',
+    description: 'Choose the GitHub repository Gradient should remember and work in.',
+    icon: FolderGit2,
+    required: true,
+  },
+  {
+    id: 'linear',
+    label: 'Optional Linear',
+    description: 'Connect Linear if you want issue-driven automation.',
+    icon: Link2,
+    required: false,
+  },
+  {
+    id: 'claude',
+    label: 'Add AI key',
+    description: 'Add your Anthropic key so tasks can execute against your own account.',
+    icon: KeyRound,
+    required: true,
+  },
+  {
+    id: 'launch',
+    label: 'Start building',
+    description: 'Open memory, create tasks, or let Linear drive the workflow.',
+    icon: Rocket,
+    required: false,
+  },
 ]
 
 export default function OnboardingWizard() {
-  const [step, setStep] = useState(0)
-  const [completed, setCompleted] = useState<Set<string>>(new Set())
   const navigate = useNavigate()
   const { toast } = useToast()
 
-  const [apiKey, setApiKey] = useState('')
-  const [model, setModel] = useState('claude-sonnet-4-20250514')
-  const [useFreeTier, setUseFreeTier] = useState(false)
-
+  const [step, setStep] = useState(0)
   const [repoName, setRepoName] = useState('')
   const [manualRepoInput, setManualRepoInput] = useState(false)
+  const [apiKey, setAPIKey] = useState('')
+  const [model, setModel] = useState('claude-sonnet-4-20250514')
 
   const { data: status, refetch: refetchStatus } = useFetch(
     useCallback((token: string, orgId: string) => api.integrations.status(token, orgId), [])
   )
 
   const githubConnected = !!status?.github?.connected
+  const linearConnected = !!status?.linear?.connected
+  const claudeConfigured = !!status?.claude?.configured
+  const repoConnected = !!status?.repos?.connected
 
   const { data: availableData, loading: loadingRepos, refetch: refetchRepos } = useFetch(
     useCallback((token: string, orgId: string) => {
@@ -46,40 +69,45 @@ export default function OnboardingWizard() {
   )
   const availableRepos = availableData?.repos || []
 
-  useEffect(() => {
-    if (!status) return
+  const completed = useMemo(() => {
     const done = new Set<string>()
-    if (status.linear?.connected) done.add('linear')
-    if (status.claude?.configured) done.add('claude')
-    if (status.repos?.connected) done.add('repo')
-    setCompleted(done)
+    if (repoConnected) done.add('repo')
+    if (linearConnected) done.add('linear')
+    if (claudeConfigured) done.add('claude')
+    return done
+  }, [claudeConfigured, linearConnected, repoConnected])
 
-    const firstIncomplete = STEPS.findIndex(s => !done.has(s.id))
-    if (firstIncomplete >= 0 && firstIncomplete !== step) setStep(firstIncomplete)
-  }, [status])
+  useEffect(() => {
+    const nextStep = !repoConnected
+      ? 0
+      : !linearConnected && !claudeConfigured
+        ? 1
+        : !claudeConfigured
+          ? 2
+          : 3
 
-  // OAuth mutations
+    setStep((current) => (current === nextStep ? current : nextStep))
+  }, [repoConnected, linearConnected, claudeConfigured])
+
   const { mutate: getLinearURL, loading: linearLoading, error: linearError } = useMutation(
-    (token: string, orgId: string, _: any) => api.integrations.linear.authUrl(token, orgId)
+    (token: string, orgId: string, _: null) => api.integrations.linear.authUrl(token, orgId)
   )
   const { mutate: exchangeLinearCode } = useMutation(
     (token: string, orgId: string, body: any) => api.integrations.linear.callback(token, orgId, body)
   )
   const { mutate: getGitHubURL, loading: githubLoading, error: githubError } = useMutation(
-    (token: string, orgId: string, _: any) => api.integrations.github.authUrl(token, orgId)
+    (token: string, orgId: string, _: null) => api.integrations.github.authUrl(token, orgId)
   )
   const { mutate: exchangeGitHubCode } = useMutation(
     (token: string, orgId: string, body: any) => api.integrations.github.callback(token, orgId, body)
   )
-
-  const { mutate: saveClaude, loading: claudeLoading, error: claudeError } = useMutation(
-    (token: string, orgId: string, body: any) => api.integrations.claude.save(token, orgId, body)
-  )
   const { mutate: connectRepo, loading: repoLoading, error: repoError } = useMutation(
     (token: string, orgId: string, body: any) => api.repos.connect(token, orgId, body)
   )
+  const { mutate: saveClaude, loading: claudeLoading, error: claudeError } = useMutation(
+    (token: string, orgId: string, body: any) => api.integrations.claude.save(token, orgId, body)
+  )
 
-  // Handle OAuth callback when returning from Linear/GitHub
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
@@ -91,308 +119,156 @@ export default function OnboardingWizard() {
     localStorage.removeItem('oauth_provider')
 
     if (provider === 'linear') {
-      exchangeLinearCode({ code, state: state || '' }).then(result => {
+      exchangeLinearCode({ code, state: state || '' }).then((result) => {
         if (result?.connected) {
           toast('success', `Linear connected to ${result.workspace_name || 'workspace'}`)
           refetchStatus()
         }
       })
-    } else if (provider === 'github') {
-      exchangeGitHubCode({ code, state: state || '' }).then(result => {
+      return
+    }
+
+    if (provider === 'github') {
+      exchangeGitHubCode({ code, state: state || '' }).then((result) => {
         if (result?.connected) {
           toast('success', `GitHub connected as ${result.github_user}`)
           refetchStatus()
           refetchRepos()
         }
       })
-    } else {
-      exchangeLinearCode({ code, state: state || '' }).then(result => {
-        if (result?.connected) {
-          toast('success', `Linear connected to ${result.workspace_name || 'workspace'}`)
-          refetchStatus()
-        } else {
-          exchangeGitHubCode({ code, state: state || '' }).then(ghResult => {
-            if (ghResult?.connected) {
-              toast('success', `GitHub connected as ${ghResult.github_user}`)
-              refetchStatus()
-              refetchRepos()
-            }
-          })
-        }
-      })
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleConnectLinear = async () => {
-    const result = await getLinearURL(null)
-    if (result?.url) {
-      localStorage.setItem('oauth_provider', 'linear')
-      window.location.href = result.url
-    } else {
-      toast('error', 'Failed to get Linear authorization URL. Please try again.')
-    }
-  }
+  }, [exchangeGitHubCode, exchangeLinearCode, refetchRepos, refetchStatus, toast])
 
   const handleConnectGitHub = async () => {
     const result = await getGitHubURL(null)
-    if (result?.url) {
-      localStorage.setItem('oauth_provider', 'github')
-      window.location.href = result.url
-    } else {
-      toast('error', 'Failed to get GitHub authorization URL. Please try again.')
+    if (!result?.url) {
+      toast('error', 'Failed to start GitHub authorization')
+      return
     }
-  }
-
-  const handleSaveClaude = async () => {
-    const body = useFreeTier
-      ? { use_free_tier: true, model: 'qwen3.5-122b' }
-      : { api_key: apiKey, model, max_turns: 50 }
-    const result = await saveClaude(body)
-    if (result) {
-      setCompleted(prev => new Set([...prev, 'claude']))
-      toast('success', useFreeTier ? 'Free tier model activated!' : 'Claude Code configured!')
-      setStep(2)
-      refetchStatus()
-    }
+    localStorage.setItem('oauth_provider', 'github')
+    window.location.href = result.url
   }
 
   const handleConnectRepo = async () => {
+    if (!repoName) return
     const result = await connectRepo({ repo: repoName })
-    if (result) {
-      setCompleted(prev => new Set([...prev, 'repo']))
-      toast('success', 'Repository connected!')
-      setStep(3)
-      refetchStatus()
-    }
+    if (!result) return
+    toast('success', 'Repository connected')
+    refetchStatus()
+    setStep(1)
   }
 
-  const allDone = completed.has('linear') && completed.has('claude') && completed.has('repo')
+  const handleConnectLinear = async () => {
+    const result = await getLinearURL(null)
+    if (!result?.url) {
+      toast('error', 'Failed to start Linear authorization')
+      return
+    }
+    localStorage.setItem('oauth_provider', 'linear')
+    window.location.href = result.url
+  }
+
+  const handleSaveClaude = async () => {
+    const result = await saveClaude({
+      api_key: apiKey,
+      model,
+      max_turns: 50,
+    })
+    if (!result) return
+    toast('success', 'Anthropic key saved')
+    setAPIKey('')
+    refetchStatus()
+    setStep(3)
+  }
+
+  const allRequiredDone = repoConnected && claudeConfigured
   const currentStep = STEPS[step]
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="text-center">
-        <div className="flex justify-center mb-3">
-          <Rocket className="w-8 h-8 text-primary" />
-        </div>
-        <h2 className="text-lg font-semibold text-foreground">Get Started with Gradient</h2>
-        <p className="text-sm text-muted-foreground mt-1">Connect your tools, then start labeling issues — the agent handles the rest</p>
-      </div>
-
-      {/* Progress */}
-      <div className="flex items-center justify-center gap-2">
-        {STEPS.map((s, i) => (
-          <div key={s.id} className="flex items-center gap-2">
-            <button
-              onClick={() => setStep(i)}
-              className={cn(
-                'w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all',
-                completed.has(s.id)
-                  ? 'bg-emerald-500 text-white'
-                  : i === step
-                    ? 'bg-primary text-primary-foreground ring-2 ring-primary/30'
-                    : 'bg-muted text-muted-foreground',
-              )}
-            >
-              {completed.has(s.id) ? <CheckCircle2 className="w-4 h-4" /> : i + 1}
-            </button>
-            {i < STEPS.length - 1 && (
-              <div className={cn('w-12 h-0.5', completed.has(s.id) ? 'bg-emerald-500' : 'bg-border')} />
-            )}
+    <div className="mx-auto max-w-4xl space-y-6">
+      <Card className="overflow-hidden">
+        <div className="border-b border-border bg-gradient-to-r from-primary/10 via-transparent to-transparent px-6 py-6">
+          <div className="max-w-2xl">
+            <Badge variant="secondary">Fast onboarding</Badge>
+            <h2 className="mt-3 text-2xl font-semibold text-foreground">Connect a repo, optionally plug in Linear, then add your AI key</h2>
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+              Gradient is easiest when the repo is the center of everything. Once that is connected, we can start building repo memory, trajectory analyses, and retrieval guidance immediately.
+            </p>
           </div>
-        ))}
-      </div>
-
-      {/* Step content */}
-      <Card className="p-6">
-        <div className="flex items-center gap-3 mb-4">
-          <currentStep.icon className="w-5 h-5 text-primary" />
-          <div>
-            <p className="text-sm font-medium text-foreground">{currentStep.label}</p>
-            <p className="text-xs text-muted-foreground">{currentStep.description}</p>
-          </div>
-          {completed.has(currentStep.id) && (
-            <Badge className="ml-auto bg-emerald-500/10 text-emerald-400">
-              <CheckCircle2 className="w-3 h-3 mr-1" /> Done
-            </Badge>
-          )}
         </div>
 
-        {/* Step 1: Linear */}
-        {step === 0 && (
-          <div className="space-y-4">
-            {status?.linear?.connected ? (
-              <>
-                <div className="flex items-center gap-2 p-3 rounded-md bg-emerald-500/5 border border-emerald-500/20">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span className="text-sm text-foreground">Connected to {status.linear.workspace_name}</span>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => setStep(1)}>
-                  Continue <ArrowRight className="w-3.5 h-3.5" />
-                </Button>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-muted-foreground">
-                  Connect your Linear workspace so Gradient can watch for issues labeled <code className="text-primary font-semibold">gradient-agent</code>.
-                  You'll be redirected to Linear to authorize access.
-                </p>
-                <Button onClick={handleConnectLinear} loading={linearLoading}>
-                  <Plug className="w-3.5 h-3.5" /> Connect Linear
-                </Button>
-                {linearError && <p className="text-xs text-destructive">{linearError}</p>}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Step 2: AI Model */}
-        {step === 1 && (
-          <div className="space-y-4">
-            {status?.claude?.configured ? (
-              <>
-                <div className="flex items-center gap-2 p-3 rounded-md bg-emerald-500/5 border border-emerald-500/20">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span className="text-sm text-foreground">AI model configured ({status.claude.model})</span>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => setStep(2)}>
-                  Continue <ArrowRight className="w-3.5 h-3.5" />
-                </Button>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-muted-foreground">
-                  Choose the AI model that powers the agent. Use our free tier to get started instantly, or bring your own Claude API key for premium performance.
-                </p>
-
-                {/* Free tier option */}
-                <button
-                  onClick={() => setUseFreeTier(true)}
-                  className={cn(
-                    'w-full text-left rounded-lg border p-4 transition-all',
-                    useFreeTier
-                      ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
-                      : 'border-border hover:border-primary/30',
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className={cn(
-                      'mt-0.5 h-4 w-4 rounded-full border-2 flex items-center justify-center shrink-0',
-                      useFreeTier ? 'border-primary' : 'border-muted-foreground/40',
-                    )}>
-                      {useFreeTier && <div className="h-2 w-2 rounded-full bg-primary" />}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-foreground">Free tier</p>
-                        <Badge variant="success" className="text-[10px]">No API key needed</Badge>
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Powered by Qwen 3.5 122B — a capable open-source model. Great for getting started and smaller tasks.
-                      </p>
-                    </div>
-                  </div>
-                </button>
-
-                {/* BYOK option */}
-                <button
-                  onClick={() => setUseFreeTier(false)}
-                  className={cn(
-                    'w-full text-left rounded-lg border p-4 transition-all',
-                    !useFreeTier
-                      ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
-                      : 'border-border hover:border-primary/30',
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className={cn(
-                      'mt-0.5 h-4 w-4 rounded-full border-2 flex items-center justify-center shrink-0',
-                      !useFreeTier ? 'border-primary' : 'border-muted-foreground/40',
-                    )}>
-                      {!useFreeTier && <div className="h-2 w-2 rounded-full bg-primary" />}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-foreground">Bring your own key</p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Use your Anthropic API key with Claude Sonnet for the best results on complex tasks.
-                      </p>
-                    </div>
-                  </div>
-                </button>
-
-                {!useFreeTier && (
-                  <div className="space-y-3 pl-7">
-                    <Input
-                      label="Anthropic API Key"
-                      placeholder="sk-ant-..."
-                      value={apiKey}
-                      onChange={e => setApiKey(e.target.value)}
-                      mono
-                      type="password"
-                    />
-                    <Input
-                      label="Model (optional)"
-                      placeholder="claude-sonnet-4-20250514"
-                      value={model}
-                      onChange={e => setModel(e.target.value)}
-                      mono
-                    />
-                    <p className="text-[10px] text-muted-foreground">
-                      Get a key at{' '}
-                      <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                        console.anthropic.com
-                      </a>
-                    </p>
-                  </div>
+        <div className="px-6 py-5">
+          <div className="grid gap-3 md:grid-cols-4">
+            {STEPS.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setStep(index)}
+                className={cn(
+                  'rounded-xl border px-4 py-4 text-left transition-colors',
+                  step === index ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/20',
                 )}
-
-                <Button
-                  onClick={handleSaveClaude}
-                  loading={claudeLoading}
-                  disabled={!useFreeTier && !apiKey}
-                >
-                  <Key className="w-3.5 h-3.5" /> {useFreeTier ? 'Activate Free Tier' : 'Save Configuration'}
-                </Button>
-                {claudeError && <p className="text-xs text-destructive">{claudeError}</p>}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Step 3: Connect repo */}
-        {step === 2 && (
-          <div className="space-y-4">
-            {status?.repos?.connected ? (
-              <>
-                <div className="flex items-center gap-2 p-3 rounded-md bg-emerald-500/5 border border-emerald-500/20">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span className="text-sm text-foreground">{status.repos.count} repo(s) connected</span>
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-xs font-semibold text-foreground">
+                    {completed.has(item.id) ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : index + 1}
+                  </div>
+                  {!item.required && <Badge variant="outline">Optional</Badge>}
                 </div>
-                <Button variant="outline" size="sm" onClick={() => setStep(3)}>
-                  Continue <ArrowRight className="w-3.5 h-3.5" />
+                <div className="mt-3">
+                  <p className="text-sm font-medium text-foreground">{item.label}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{item.description}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      <Card className="p-6">
+        <div className="mb-5 flex items-start gap-3">
+          <div className="rounded-lg border border-primary/20 bg-primary/5 p-2 text-primary">
+            <currentStep.icon className="h-4 w-4" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-foreground">{currentStep.label}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{currentStep.description}</p>
+          </div>
+        </div>
+
+        {step === 0 && (
+          <div className="space-y-5">
+            {repoConnected ? (
+              <div className="space-y-4">
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                    {status?.repos?.count || 1} repo connection{status?.repos?.count === 1 ? '' : 's'} ready
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Repo memory, trajectory analysis, and MCP guidance are all organized per repository now.
+                  </p>
+                </div>
+                <Button onClick={() => setStep(1)}>
+                  Continue <ArrowRight className="h-3.5 w-3.5" />
                 </Button>
-              </>
+              </div>
             ) : !githubConnected ? (
-              <>
-                <p className="text-sm text-muted-foreground">
-                  First, connect your GitHub account. You'll be redirected to GitHub to authorize access.
-                  Then you can select which repository the agent should work in.
-                </p>
+              <div className="space-y-4">
+                <Callout variant="tip" title="GitHub comes first">
+                  Connect GitHub, pick the repository, and Gradient will scope durable memory, branch context, sessions, and retrieval history to that repo from the start.
+                </Callout>
                 <Button onClick={handleConnectGitHub} loading={githubLoading}>
-                  <Github className="w-3.5 h-3.5" /> Connect GitHub
+                  <Github className="h-3.5 w-3.5" />
+                  Connect GitHub
                 </Button>
                 {githubError && <p className="text-xs text-destructive">{githubError}</p>}
-              </>
+              </div>
             ) : (
-              <>
-                <div className="flex items-center gap-2 p-3 rounded-md bg-primary/5 border border-primary/20 mb-2">
-                  <Github className="w-4 h-4 text-primary" />
-                  <span className="text-sm text-foreground">GitHub connected as {status?.github?.github_user}</span>
+              <div className="space-y-4">
+                <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+                  <p className="text-sm text-foreground">GitHub connected as <span className="font-medium">{status?.github?.github_user}</span></p>
                 </div>
-                <p className="text-sm text-muted-foreground">
-                  Select a repository for the agent to work in. It will create branches and open PRs here.
-                </p>
 
                 {loadingRepos ? (
                   <Skeleton className="h-10 w-full" />
@@ -400,17 +276,17 @@ export default function OnboardingWizard() {
                   <>
                     <Select
                       label="Repository"
-                      placeholder="Select a repository..."
                       value={repoName}
-                      onChange={e => setRepoName(e.target.value)}
+                      onChange={(event) => setRepoName(event.target.value)}
                       options={availableRepos.map((repo: string) => ({ value: repo, label: repo }))}
+                      placeholder="Select a repository..."
                     />
                     <button
                       type="button"
                       onClick={() => setManualRepoInput(true)}
-                      className="text-xs text-muted-foreground hover:text-foreground underline"
+                      className="text-xs text-muted-foreground underline transition-colors hover:text-foreground"
                     >
-                      Or enter repository manually
+                      Enter a repository manually instead
                     </button>
                   </>
                 ) : (
@@ -418,89 +294,170 @@ export default function OnboardingWizard() {
                     label="Repository"
                     placeholder="owner/repo-name"
                     value={repoName}
-                    onChange={e => setRepoName(e.target.value)}
+                    onChange={(event) => setRepoName(event.target.value)}
                     mono
                   />
                 )}
 
                 <Button onClick={handleConnectRepo} loading={repoLoading} disabled={!repoName}>
-                  <GitBranch className="w-3.5 h-3.5" /> Connect Repo
+                  <FolderGit2 className="h-3.5 w-3.5" />
+                  Connect repository
                 </Button>
                 {repoError && <p className="text-xs text-destructive">{repoError}</p>}
-              </>
+              </div>
             )}
-            <Button variant="ghost" size="sm" onClick={() => { setCompleted(prev => new Set([...prev, 'repo'])); setStep(3) }}>
-              Skip for now <ArrowRight className="w-3 h-3" />
-            </Button>
           </div>
         )}
 
-        {/* Step 4: Start Building */}
-        {step === 3 && (
+        {step === 1 && (
           <div className="space-y-5">
-            {allDone ? (
+            <Callout variant="info" title="Linear is optional">
+              Skip this if you want to create tasks manually. Connect it if you want Gradient to pick up labeled issues and turn them into PRs automatically.
+            </Callout>
+
+            {linearConnected ? (
+              <div className="space-y-4">
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                    Connected to {status?.linear?.workspace_name || 'Linear'}
+                  </div>
+                </div>
+                <Button onClick={() => setStep(2)}>
+                  Continue <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <Button onClick={handleConnectLinear} loading={linearLoading}>
+                  <Plug className="h-3.5 w-3.5" />
+                  Connect Linear
+                </Button>
+                {linearError && <p className="text-xs text-destructive">{linearError}</p>}
+                <Button variant="ghost" onClick={() => setStep(2)}>
+                  Skip for now <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="space-y-5">
+            {claudeConfigured ? (
+              <div className="space-y-4">
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                    Anthropic key configured for {status?.claude?.model || 'Claude'}
+                  </div>
+                </div>
+                <Button onClick={() => setStep(3)}>
+                  Continue <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <Callout variant="tip" title="Transparent AI billing">
+                  Your provider tokens stay on your Anthropic account. Gradient's free trial covers platform credits for persistent memory, trajectory analysis, retrieval, and runtime usage, but task execution still uses your own API key.
+                </Callout>
+
+                <Input
+                  label="Anthropic API key"
+                  placeholder="sk-ant-..."
+                  value={apiKey}
+                  onChange={(event) => setAPIKey(event.target.value)}
+                  mono
+                  type="password"
+                />
+                <Input
+                  label="Model"
+                  placeholder="claude-sonnet-4-20250514"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  mono
+                />
+                <p className="text-xs text-muted-foreground">
+                  Recommended starting model: <code className="text-foreground">claude-sonnet-4-20250514</code>. Get a key at{' '}
+                  <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                    console.anthropic.com
+                  </a>.
+                </p>
+
+                <Button onClick={handleSaveClaude} loading={claudeLoading} disabled={!apiKey}>
+                  <KeyRound className="h-3.5 w-3.5" />
+                  Save Anthropic key
+                </Button>
+                {claudeError && <p className="text-xs text-destructive">{claudeError}</p>}
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-6">
+            {allRequiredDone ? (
               <>
-                <div className="text-center py-4">
-                  <PartyPopper className="w-10 h-10 text-primary mx-auto mb-3" />
-                  <h3 className="text-base font-semibold text-foreground mb-1">You're all set!</h3>
-                  <p className="text-sm text-muted-foreground">
-                    Everything is connected. Here's what to do next:
-                  </p>
-                </div>
-
-                <div className="rounded-lg border border-border bg-muted/30 p-5 space-y-4">
-                  <div className="flex gap-3">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-bold">1</div>
-                    <div>
-                      <p className="text-sm font-medium text-foreground">Go to Linear</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Open your Linear workspace and create an issue (or pick an existing one).
-                      </p>
+                <div className="rounded-2xl border border-primary/20 bg-gradient-to-br from-primary/10 to-transparent p-5">
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-full bg-primary/15 p-2 text-primary">
+                      <Sparkles className="h-4 w-4" />
                     </div>
-                  </div>
-                  <div className="flex gap-3">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-bold">2</div>
                     <div>
-                      <p className="text-sm font-medium text-foreground">
-                        Add the <code className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-xs font-semibold">gradient-agent</code> label
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Create a label called "gradient-agent" in Linear if you haven't already, then apply it to any issue you want the AI to work on.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex gap-3">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-bold">3</div>
-                    <div>
-                      <p className="text-sm font-medium text-foreground">Watch the agent work</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Come back to the <strong>Tasks</strong> tab to monitor progress. The agent will create a branch, write code, and open a PR automatically.
+                      <h3 className="text-base font-semibold text-foreground">You are ready to build repo memory</h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Gradient can now execute tasks, attribute trajectories, store durable tips, and surface repo-level memory on the new Memory page.
                       </p>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <a href="https://linear.app" target="_blank" rel="noopener noreferrer" className="flex-1">
-                    <Button className="w-full gap-2">
-                      Open Linear <ExternalLink className="w-3.5 h-3.5" />
+                <div className="grid gap-4 md:grid-cols-3">
+                  <Card className="p-4">
+                    <p className="text-sm font-semibold text-foreground">1. Open Memory</p>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      Inspect the tips, trajectories, retrieval runs, MCP tools, and live mesh activity for your connected repo.
+                    </p>
+                  </Card>
+                  <Card className="p-4">
+                    <p className="text-sm font-semibold text-foreground">2. Start a task</p>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      Create a manual task now, or let Linear drive it if you connected a workspace.
+                    </p>
+                  </Card>
+                  <Card className="p-4">
+                    <p className="text-sm font-semibold text-foreground">3. Watch the memory improve</p>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      Each clean success, recovery, and inefficient success becomes reusable guidance for the next run.
+                    </p>
+                  </Card>
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <Link to="/dashboard/context" className="flex-1">
+                    <Button className="w-full">
+                      Open Memory workspace <ArrowRight className="h-3.5 w-3.5" />
                     </Button>
-                  </a>
-                  <Button variant="outline" className="flex-1 gap-2" onClick={() => navigate('/dashboard/tasks')}>
-                    Go to Tasks <ArrowRight className="w-3.5 h-3.5" />
+                  </Link>
+                  <Button variant="outline" className="flex-1" onClick={() => navigate('/dashboard/tasks')}>
+                    Go to Tasks <ArrowRight className="h-3.5 w-3.5" />
                   </Button>
+                  {linearConnected && (
+                    <a href="https://linear.app" target="_blank" rel="noopener noreferrer" className="flex-1">
+                      <Button variant="ghost" className="w-full">
+                        Open Linear <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                    </a>
+                  )}
                 </div>
               </>
             ) : (
-              <div className="text-center py-6">
-                <p className="text-sm text-muted-foreground mb-4">
-                  Complete the previous steps first to unlock this page.
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  Finish the required repo and AI key steps first. Linear can wait until you want issue-driven automation.
                 </p>
-                <Button variant="outline" size="sm" onClick={() => {
-                  const firstIncomplete = STEPS.findIndex(s => !completed.has(s.id))
-                  if (firstIncomplete >= 0) setStep(firstIncomplete)
-                }}>
-                  Go to first incomplete step <ArrowRight className="w-3 h-3" />
+                <Button variant="outline" onClick={() => setStep(!repoConnected ? 0 : 2)}>
+                  Go to next required step <ArrowRight className="h-3.5 w-3.5" />
                 </Button>
               </div>
             )}
@@ -508,23 +465,15 @@ export default function OnboardingWizard() {
         )}
       </Card>
 
-      {/* Navigation */}
       <div className="flex items-center justify-between">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setStep(Math.max(0, step - 1))}
-          disabled={step === 0}
-        >
-          <ArrowLeft className="w-3.5 h-3.5" /> Back
+        <Button variant="ghost" onClick={() => setStep(Math.max(0, step - 1))} disabled={step === 0}>
+          <ArrowLeft className="h-3.5 w-3.5" />
+          Back
         </Button>
         {step < STEPS.length - 1 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setStep(step + 1)}
-          >
-            Next <ArrowRight className="w-3.5 h-3.5" />
+          <Button variant="ghost" onClick={() => setStep(step + 1)}>
+            Next
+            <ArrowRight className="h-3.5 w-3.5" />
           </Button>
         )}
       </div>
