@@ -68,10 +68,10 @@ type Config struct {
 	GitHubOAuthRedirectURI  string
 
 	// Linear Integration (agent tasks)
-	LinearClientID       string
-	LinearClientSecret   string
-	LinearRedirectURI    string
-	LinearWebhookSecret  string
+	LinearClientID      string
+	LinearClientSecret  string
+	LinearRedirectURI   string
+	LinearWebhookSecret string
 
 	// Secrets Backends
 	VaultAddr  string
@@ -102,70 +102,82 @@ type Config struct {
 	// MCP
 	MCPServerPort string
 
+	// Embeddings
+	EmbeddingProvider         string
+	OpenAIAPIKey              string
+	OpenAIEmbeddingModel      string
+	OpenAIEmbeddingBaseURL    string
+	OpenAIEmbeddingDimensions int
+
 	// Logging
 	LogLevel string
 }
 
 func Load() *Config {
 	return &Config{
-		Port:                   getEnv("PORT", "6767"),
-		Env:                    getEnv("ENV", "development"),
-		DatabaseURL:            getEnv("DATABASE_URL", ""),
-		ClerkSecretKey:         getEnv("CLERK_SECRET_KEY", ""),
-		ClerkPEMPublicKey:      getEnv("CLERK_PEM_PUBLIC_KEY", ""),
-		ClerkJWKSURL:           getEnv("CLERK_JWKS_URL", ""),
-		ClerkPublishableKey:    getEnv("CLERK_PUBLISHABLE_KEY", ""),
-		StripeSecretKey:        getEnv("STRIPE_SECRET_KEY", ""),
-		StripeWebhookSecret:    getEnv("STRIPE_WEBHOOK_SECRET", ""),
-		StripePriceSmallID:     getEnv("STRIPE_PRICE_SMALL_ID", ""),
-		StripePriceMediumID:    getEnv("STRIPE_PRICE_MEDIUM_ID", ""),
-		StripePriceLargeID:     getEnv("STRIPE_PRICE_LARGE_ID", ""),
-		StripePriceGPUID:       getEnv("STRIPE_PRICE_GPU_ID", ""),
-		HetznerAPIToken:        getEnv("HETZNER_API_TOKEN", ""),
-		HetznerLocation:        getEnv("HETZNER_LOCATION", "fsn1"),
-		HetznerSSHKeyIDs:       getEnv("HETZNER_SSH_KEY_IDS", ""),
-		HetznerSSHPrivKey:      unescapeNewlines(getEnv("HETZNER_SSH_PRIVATE_KEY", "")),
-		HetznerFirewallID:      getEnv("HETZNER_FIREWALL_ID", ""),
-		HetznerNetworkID:       getEnv("HETZNER_NETWORK_ID", ""),
-		HetznerImageID:         getEnv("HETZNER_IMAGE_ID", ""),
-		RegistryURL:            getEnv("REGISTRY_URL", ""),
-		RegistryUser:           getEnv("REGISTRY_USER", ""),
-		RegistryPass:           getEnv("REGISTRY_PASS", ""),
-		AWSAccessKeyID:         getEnv("AWS_ACCESS_KEY_ID", ""),
-		AWSSecretAccessKey:     getEnv("AWS_SECRET_ACCESS_KEY", ""),
-		AWSRegion:              getEnv("AWS_REGION", "us-east-2"),
-		AWSAmiID:               getEnv("AWS_AMI_ID", ""),
-		AWSSecurityGroupID:     getEnv("AWS_SECURITY_GROUP_ID", ""),
-		AWSSubnetID:            getEnv("AWS_SUBNET_ID", ""),
-		AWSKeyPairName:         getEnv("AWS_KEY_PAIR_NAME", ""),
-		AWSECRRepoURI:          getEnv("AWS_ECR_REPO_URI", ""),
-		AWSInstanceProfile:     getEnv("AWS_INSTANCE_PROFILE", ""),
-		GCPProjectID:           getEnv("GCP_PROJECT_ID", ""),
-		GCPCredentialsPath:     getEnv("GCP_CREDENTIALS_PATH", ""),
-		GCPRegion:              getEnv("GCP_REGION", "us-west1"),
-		GitHubAppID:             getEnv("GITHUB_APP_ID", ""),
-		GitHubAppWebhookSecret:  getEnv("GITHUB_APP_WEBHOOK_SECRET", ""),
-		GitHubOAuthClientID:     getEnv("GITHUB_OAUTH_CLIENT_ID", ""),
-		GitHubOAuthClientSecret: getEnv("GITHUB_OAUTH_CLIENT_SECRET", ""),
-		GitHubOAuthRedirectURI:  getEnv("GITHUB_OAUTH_REDIRECT_URI", ""),
-		LinearClientID:         getEnv("LINEAR_CLIENT_ID", ""),
-		LinearClientSecret:     getEnv("LINEAR_CLIENT_SECRET", ""),
-		LinearRedirectURI:      getEnv("LINEAR_REDIRECT_URI", ""),
-		LinearWebhookSecret:    getEnv("LINEAR_WEBHOOK_SECRET", ""),
-		VaultAddr:              getEnv("VAULT_ADDR", ""),
-		VaultToken:             getEnv("VAULT_TOKEN", ""),
-		JWTSecret:              getEnv("JWT_SECRET", ""),
-		APIURL:                 getEnv("API_URL", ""),
-		AgentDownloadURL:       getEnv("AGENT_DOWNLOAD_URL", ""),
-		NATSUrl:                getEnv("NATS_URL", ""),
-		NATSAuthToken:          getEnv("NATS_AUTH_TOKEN", ""),
-		NATSMaxAge:             getEnv("NATS_MAX_AGE", "168h"),
-		WarmPoolDefaultSize:    getEnvInt("WARM_POOL_DEFAULT_SIZE", 3),
-		WarmPoolMaxSize:        clampInt(getEnvInt("WARM_POOL_MAX_SIZE", 3), 0, 8),
-		WarmPoolIdleTimeout:    getEnv("WARM_POOL_IDLE_TIMEOUT", "30m"),
-		DevEnvSrc:              getEnv("DEV_ENV_SRC", "aws"),
-		MCPServerPort:          getEnv("MCP_SERVER_PORT", "8081"),
-		LogLevel:               getEnv("LOG_LEVEL", "info"),
+		Port:                      getEnv("PORT", "6767"),
+		Env:                       getEnv("ENV", "development"),
+		DatabaseURL:               getEnv("DATABASE_URL", ""),
+		ClerkSecretKey:            getEnv("CLERK_SECRET_KEY", ""),
+		ClerkPEMPublicKey:         getEnv("CLERK_PEM_PUBLIC_KEY", ""),
+		ClerkJWKSURL:              getEnv("CLERK_JWKS_URL", ""),
+		ClerkPublishableKey:       getEnv("CLERK_PUBLISHABLE_KEY", ""),
+		StripeSecretKey:           getEnv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret:       getEnv("STRIPE_WEBHOOK_SECRET", ""),
+		StripePriceSmallID:        getEnv("STRIPE_PRICE_SMALL_ID", ""),
+		StripePriceMediumID:       getEnv("STRIPE_PRICE_MEDIUM_ID", ""),
+		StripePriceLargeID:        getEnv("STRIPE_PRICE_LARGE_ID", ""),
+		StripePriceGPUID:          getEnv("STRIPE_PRICE_GPU_ID", ""),
+		HetznerAPIToken:           getEnv("HETZNER_API_TOKEN", ""),
+		HetznerLocation:           getEnv("HETZNER_LOCATION", "fsn1"),
+		HetznerSSHKeyIDs:          getEnv("HETZNER_SSH_KEY_IDS", ""),
+		HetznerSSHPrivKey:         unescapeNewlines(getEnv("HETZNER_SSH_PRIVATE_KEY", "")),
+		HetznerFirewallID:         getEnv("HETZNER_FIREWALL_ID", ""),
+		HetznerNetworkID:          getEnv("HETZNER_NETWORK_ID", ""),
+		HetznerImageID:            getEnv("HETZNER_IMAGE_ID", ""),
+		RegistryURL:               getEnv("REGISTRY_URL", ""),
+		RegistryUser:              getEnv("REGISTRY_USER", ""),
+		RegistryPass:              getEnv("REGISTRY_PASS", ""),
+		AWSAccessKeyID:            getEnv("AWS_ACCESS_KEY_ID", ""),
+		AWSSecretAccessKey:        getEnv("AWS_SECRET_ACCESS_KEY", ""),
+		AWSRegion:                 getEnv("AWS_REGION", "us-east-1"),
+		AWSAmiID:                  getEnv("AWS_AMI_ID", ""),
+		AWSSecurityGroupID:        getEnv("AWS_SECURITY_GROUP_ID", ""),
+		AWSSubnetID:               getEnv("AWS_SUBNET_ID", ""),
+		AWSKeyPairName:            getEnv("AWS_KEY_PAIR_NAME", ""),
+		AWSECRRepoURI:             getEnv("AWS_ECR_REPO_URI", ""),
+		AWSInstanceProfile:        getEnv("AWS_INSTANCE_PROFILE", ""),
+		GCPProjectID:              getEnv("GCP_PROJECT_ID", ""),
+		GCPCredentialsPath:        getEnv("GCP_CREDENTIALS_PATH", ""),
+		GCPRegion:                 getEnv("GCP_REGION", "us-west1"),
+		GitHubAppID:               getEnv("GITHUB_APP_ID", ""),
+		GitHubAppWebhookSecret:    getEnv("GITHUB_APP_WEBHOOK_SECRET", ""),
+		GitHubOAuthClientID:       getEnv("GITHUB_OAUTH_CLIENT_ID", ""),
+		GitHubOAuthClientSecret:   getEnv("GITHUB_OAUTH_CLIENT_SECRET", ""),
+		GitHubOAuthRedirectURI:    getEnv("GITHUB_OAUTH_REDIRECT_URI", ""),
+		LinearClientID:            getEnv("LINEAR_CLIENT_ID", ""),
+		LinearClientSecret:        getEnv("LINEAR_CLIENT_SECRET", ""),
+		LinearRedirectURI:         getEnv("LINEAR_REDIRECT_URI", ""),
+		LinearWebhookSecret:       getEnv("LINEAR_WEBHOOK_SECRET", ""),
+		VaultAddr:                 getEnv("VAULT_ADDR", ""),
+		VaultToken:                getEnv("VAULT_TOKEN", ""),
+		JWTSecret:                 getEnv("JWT_SECRET", ""),
+		APIURL:                    getEnv("API_URL", ""),
+		AgentDownloadURL:          getEnv("AGENT_DOWNLOAD_URL", ""),
+		NATSUrl:                   getEnv("NATS_URL", ""),
+		NATSAuthToken:             getEnv("NATS_AUTH_TOKEN", ""),
+		NATSMaxAge:                getEnv("NATS_MAX_AGE", "168h"),
+		WarmPoolDefaultSize:       getEnvInt("WARM_POOL_DEFAULT_SIZE", 3),
+		WarmPoolMaxSize:           clampInt(getEnvInt("WARM_POOL_MAX_SIZE", 3), 0, 8),
+		WarmPoolIdleTimeout:       getEnv("WARM_POOL_IDLE_TIMEOUT", "30m"),
+		DevEnvSrc:                 getEnv("DEV_ENV_SRC", "aws"),
+		MCPServerPort:             getEnv("MCP_SERVER_PORT", "8081"),
+		EmbeddingProvider:         getEnv("EMBEDDING_PROVIDER", ""),
+		OpenAIAPIKey:              getEnv("OPENAI_API_KEY", ""),
+		OpenAIEmbeddingModel:      getEnv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+		OpenAIEmbeddingBaseURL:    getEnv("OPENAI_EMBEDDING_BASE_URL", "https://api.openai.com/v1"),
+		OpenAIEmbeddingDimensions: getEnvInt("OPENAI_EMBEDDING_DIMENSIONS", 1536),
+		LogLevel:                  getEnv("LOG_LEVEL", "info"),
 	}
 }
 

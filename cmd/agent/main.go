@@ -286,18 +286,21 @@ type eventHandler struct {
 }
 
 type liveContextFile struct {
-	Events     []liveEventEntry  `json:"events"`
-	Packages   map[string]string `json:"packages"` // name → version
-	Patterns   map[string]string `json:"patterns"` // key → value
-	Configs    map[string]string `json:"configs"`  // key → value
-	Errors     []liveEventEntry  `json:"errors"`
-	LastUpdate time.Time         `json:"last_update"`
+	Packages      map[string]string   `json:"packages"`       // name → version
+	Configs       map[string]string   `json:"configs"`        // key → value
+	Contracts     map[string]string   `json:"contracts"`      // contract_id → summary
+	UrgentIssues  []operationalUpdate `json:"urgent_issues"`  // last urgent peer issues
+	RecentUpdates []operationalUpdate `json:"recent_updates"` // compact unread/read delta source
+	LastUpdate    time.Time           `json:"last_update"`
+	LastSequence  int64               `json:"last_sequence"`
 }
 
-type liveEventEntry struct {
+type operationalUpdate struct {
+	Seq       int64           `json:"seq"`
 	ID        string          `json:"id"`
 	Type      string          `json:"type"`
 	EnvID     string          `json:"env_id"`
+	Summary   string          `json:"summary"`
 	Data      json.RawMessage `json:"data"`
 	Timestamp time.Time       `json:"timestamp"`
 }
@@ -306,11 +309,11 @@ func newEventHandler(cfg *AgentConfig) *eventHandler {
 	h := &eventHandler{
 		cfg: cfg,
 		liveContext: &liveContextFile{
-			Events:   []liveEventEntry{},
-			Packages: make(map[string]string),
-			Patterns: make(map[string]string),
-			Configs:  make(map[string]string),
-			Errors:   []liveEventEntry{},
+			Packages:      make(map[string]string),
+			Configs:       make(map[string]string),
+			Contracts:     make(map[string]string),
+			UrgentIssues:  []operationalUpdate{},
+			RecentUpdates: []operationalUpdate{},
 		},
 	}
 
@@ -338,18 +341,23 @@ func (h *eventHandler) Handle(ctx context.Context, event *livectx.Event) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Add to event log (keep last 500 events)
-	entry := liveEventEntry{
+	seq := event.Sequence
+	if seq <= 0 {
+		seq = h.liveContext.LastSequence + 1
+	}
+	update := operationalUpdate{
+		Seq:       seq,
 		ID:        event.ID,
 		Type:      string(event.Type),
 		EnvID:     event.EnvID,
+		Summary:   summarizeOperationalEvent(event),
 		Data:      event.Data,
 		Timestamp: event.Timestamp,
 	}
 
-	h.liveContext.Events = append(h.liveContext.Events, entry)
-	if len(h.liveContext.Events) > 500 {
-		h.liveContext.Events = h.liveContext.Events[len(h.liveContext.Events)-500:]
+	h.liveContext.RecentUpdates = append(h.liveContext.RecentUpdates, update)
+	if len(h.liveContext.RecentUpdates) > 100 {
+		h.liveContext.RecentUpdates = h.liveContext.RecentUpdates[len(h.liveContext.RecentUpdates)-100:]
 	}
 
 	// Type-specific handling
@@ -368,18 +376,6 @@ func (h *eventHandler) Handle(ctx context.Context, event *livectx.Event) error {
 			delete(h.liveContext.Packages, data.Name)
 		}
 
-	case livectx.EventTestFailed:
-		h.liveContext.Errors = append(h.liveContext.Errors, entry)
-		if len(h.liveContext.Errors) > 100 {
-			h.liveContext.Errors = h.liveContext.Errors[len(h.liveContext.Errors)-100:]
-		}
-
-	case livectx.EventPatternLearned:
-		var data livectx.PatternData
-		if err := json.Unmarshal(event.Data, &data); err == nil {
-			h.liveContext.Patterns[data.Key] = data.Value
-		}
-
 	case livectx.EventConfigChanged:
 		var data livectx.ConfigData
 		if err := json.Unmarshal(event.Data, &data); err == nil {
@@ -390,14 +386,22 @@ func (h *eventHandler) Handle(ctx context.Context, event *livectx.Event) error {
 			}
 		}
 
-	case livectx.EventErrorEncountered:
-		h.liveContext.Errors = append(h.liveContext.Errors, entry)
-		if len(h.liveContext.Errors) > 100 {
-			h.liveContext.Errors = h.liveContext.Errors[len(h.liveContext.Errors)-100:]
+	case livectx.EventContractUpdated:
+		var data livectx.ContractUpdatedData
+		if err := json.Unmarshal(event.Data, &data); err == nil && data.ContractID != "" {
+			h.liveContext.Contracts[data.ContractID] = fmt.Sprintf("%s %s", data.Type, data.Action)
+		}
+	}
+
+	if isUrgentOperationalEvent(event) {
+		h.liveContext.UrgentIssues = append(h.liveContext.UrgentIssues, update)
+		if len(h.liveContext.UrgentIssues) > 20 {
+			h.liveContext.UrgentIssues = h.liveContext.UrgentIssues[len(h.liveContext.UrgentIssues)-20:]
 		}
 	}
 
 	h.liveContext.LastUpdate = time.Now().UTC()
+	h.liveContext.LastSequence = seq
 
 	// Persist to disk
 	return h.saveToDisk()
@@ -416,6 +420,74 @@ func (h *eventHandler) saveToDisk() error {
 	}
 
 	return os.WriteFile(contextFile, data, 0644)
+}
+
+func summarizeOperationalEvent(event *livectx.Event) string {
+	switch event.Type {
+	case livectx.EventPackageInstalled:
+		var data livectx.PackageData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return fmt.Sprintf("Package %s installed via %s", data.Name, data.Manager)
+		}
+	case livectx.EventPackageRemoved:
+		var data livectx.PackageData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return fmt.Sprintf("Package %s removed", data.Name)
+		}
+	case livectx.EventConfigChanged:
+		var data livectx.ConfigData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return fmt.Sprintf("Config %s changed", data.Key)
+		}
+	case livectx.EventContractUpdated:
+		var data livectx.ContractUpdatedData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return fmt.Sprintf("Contract %s %s", data.ContractID, data.Action)
+		}
+	case livectx.EventDecisionMade:
+		var data livectx.DecisionData
+		if json.Unmarshal(event.Data, &data) == nil && data.Message != "" {
+			return data.Message
+		}
+	case livectx.EventSubtaskMarked:
+		var data livectx.SubtaskData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return fmt.Sprintf("Subtask %s marked %s", data.Name, data.Outcome)
+		}
+	case livectx.EventErrorEncountered:
+		var data livectx.ErrorData
+		if json.Unmarshal(event.Data, &data) == nil && data.Error != "" {
+			return data.Error
+		}
+	case livectx.EventTestFailed:
+		var data livectx.TestData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return fmt.Sprintf("Test failed: %s", data.Test)
+		}
+	}
+
+	return fmt.Sprintf("%s event received", event.Type)
+}
+
+func isUrgentOperationalEvent(event *livectx.Event) bool {
+	switch event.Type {
+	case livectx.EventErrorEncountered,
+		livectx.EventTestFailed,
+		livectx.EventConflictDetected,
+		livectx.EventBugDiscovered:
+		return true
+	case livectx.EventSubtaskMarked:
+		var data livectx.SubtaskData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return strings.EqualFold(data.Outcome, "failed") || strings.EqualFold(data.Outcome, "blocked")
+		}
+	case livectx.EventDecisionMade:
+		var data livectx.DecisionData
+		if json.Unmarshal(event.Data, &data) == nil {
+			return strings.EqualFold(data.Outcome, "failed") || strings.EqualFold(data.Outcome, "blocked")
+		}
+	}
+	return false
 }
 
 // autoInstallPackage attempts to install a package that a peer env discovered.
@@ -780,6 +852,16 @@ func outboxLoop(ctx context.Context, cfg *AgentConfig, bus livectx.Bus) {
 						}
 					}
 				}
+				if eventType == livectx.EventSubtaskMarked {
+					if name, ok := eventData["subtask"]; ok {
+						eventData["name"] = name
+					} else {
+						eventData["name"] = entry.Message
+					}
+					if _, ok := eventData["summary"]; !ok {
+						eventData["summary"] = entry.Message
+					}
+				}
 
 				evt, evtErr := livectx.NewEvent(eventType, cfg.OrgID, cfg.Branch, cfg.EnvID, eventData)
 				if evtErr != nil {
@@ -807,6 +889,12 @@ func mapOutboxType(t string) livectx.EventType {
 		return livectx.EventPackageInstalled
 	case "config_changed":
 		return livectx.EventConfigChanged
+	case "decision_made":
+		return livectx.EventDecisionMade
+	case "subtask_marked":
+		return livectx.EventSubtaskMarked
+	case "contract_updated":
+		return livectx.EventContractUpdated
 	default:
 		return livectx.EventCustom
 	}

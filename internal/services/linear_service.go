@@ -145,6 +145,42 @@ func (s *LinearService) ExchangeCode(ctx context.Context, orgID, code string) (*
 	return conn, nil
 }
 
+// CreateWebhook registers a webhook in the Linear workspace so we receive issue events.
+// The URL should point to our /api/v1/webhooks/linear endpoint.
+func (s *LinearService) CreateWebhook(ctx context.Context, orgID, webhookURL string) error {
+	conn, err := s.GetConnection(ctx, orgID)
+	if err != nil || conn == nil {
+		return fmt.Errorf("no linear connection for org")
+	}
+
+	query := fmt.Sprintf(`mutation {
+		webhookCreate(input: {
+			url: "%s"
+			resourceTypes: ["Issue"]
+			label: "Gradient Agent"
+			secret: "%s"
+		}) {
+			success
+			webhook { id }
+		}
+	}`, webhookURL, conn.WebhookSecret)
+
+	resp, err := s.graphql(conn.AccessToken, query)
+	if err != nil {
+		return fmt.Errorf("failed to create Linear webhook: %w", err)
+	}
+
+	wc, _ := resp["webhookCreate"].(map[string]interface{})
+	webhook, _ := wc["webhook"].(map[string]interface{})
+	webhookID, _ := webhook["id"].(string)
+
+	if webhookID != "" {
+		_, _ = s.db.Pool.Exec(ctx, `UPDATE linear_connections SET webhook_id = $1 WHERE org_id = $2`, webhookID, orgID)
+		log.Printf("[linear] webhook created for org %s: %s → %s", orgID, webhookID, webhookURL)
+	}
+	return nil
+}
+
 func (s *LinearService) GetConnection(ctx context.Context, orgID string) (*models.LinearConnection, error) {
 	conn := &models.LinearConnection{}
 	var labelsJSON, teamsJSON, projectsJSON string
@@ -292,6 +328,58 @@ func (s *LinearService) AddComment(ctx context.Context, orgID, issueID, body str
 	query := fmt.Sprintf(`mutation { commentCreate(input: { issueId: "%s", body: "%s" }) { success } }`, issueID, escaped)
 	_, err = s.graphql(conn.AccessToken, query)
 	return err
+}
+
+// FetchLabeledIssues queries Linear's GraphQL API for issues with matching labels
+// that are in the trigger state. Used as a polling fallback when webhooks can't reach us.
+func (s *LinearService) FetchLabeledIssues(ctx context.Context, orgID string) ([]map[string]interface{}, error) {
+	conn, err := s.GetConnection(ctx, orgID)
+	if err != nil || conn == nil {
+		return nil, fmt.Errorf("no linear connection for org %s", orgID)
+	}
+
+	labelFilter := "gradient-agent"
+	if len(conn.FilterLabelNames) > 0 {
+		labelFilter = conn.FilterLabelNames[0]
+	}
+	stateFilter := "Todo"
+	if conn.TriggerState != "" {
+		stateFilter = conn.TriggerState
+	}
+
+	query := fmt.Sprintf(`{
+		issues(filter: {
+			labels: { name: { eq: "%s" } }
+			state: { name: { eq: "%s" } }
+		}, first: 20, orderBy: createdAt) {
+			nodes {
+				id
+				identifier
+				title
+				description
+				url
+				labels { nodes { name } }
+				state { name }
+				createdAt
+			}
+		}
+	}`, labelFilter, stateFilter)
+
+	resp, err := s.graphql(conn.AccessToken, query)
+	if err != nil {
+		return nil, err
+	}
+
+	issues, _ := resp["issues"].(map[string]interface{})
+	nodes, _ := issues["nodes"].([]interface{})
+
+	var results []map[string]interface{}
+	for _, n := range nodes {
+		if m, ok := n.(map[string]interface{}); ok {
+			results = append(results, m)
+		}
+	}
+	return results, nil
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────────

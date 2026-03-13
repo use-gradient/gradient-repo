@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils'
 import {
   Server, Brain, CreditCard, Settings, BookOpen, Terminal,
   ChevronDown, Building2, PanelLeftClose, Menu, ExternalLink,
-  Plus, Check, Crown, Users, Bot, Plug,
+  Plus, Check, Crown, Users, Bot, Plug, Rocket,
 } from 'lucide-react'
 import { Badge, Modal } from '@/components/ui'
 
@@ -26,6 +26,7 @@ function OrgAvatar({ name, imageUrl, size = 'md', active }: { name: string; imag
 }
 
 const navItems = [
+  { to: '/dashboard/get-started',  label: 'Get Started',  icon: Rocket },
   { to: '/dashboard/environments', label: 'Environments', icon: Server },
   { to: '/dashboard/tasks',        label: 'Tasks',        icon: Bot },
   { to: '/dashboard/context',      label: 'Context',      icon: Brain },

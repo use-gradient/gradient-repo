@@ -87,6 +87,13 @@ func (s *ContextService) GetContext(ctx context.Context, orgID, branch string) (
 	return s.store.GetByBranch(ctx, orgID, branch)
 }
 
+func (s *ContextService) GetRepoContext(ctx context.Context, orgID, repoFullName, branch string) (*models.Context, error) {
+	if repoFullName == "" {
+		return s.store.GetByBranch(ctx, orgID, branch)
+	}
+	return s.store.GetByRepoBranch(ctx, orgID, repoFullName, branch)
+}
+
 func (s *ContextService) ListContexts(ctx context.Context, orgID string) ([]*models.Context, error) {
 	return s.store.ListByOrg(ctx, orgID)
 }

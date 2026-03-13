@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,8 @@ type TaskExecutorService struct {
 	githubService  *GitHubService
 	linearService  *LinearService
 	contextService *ContextService
+	sessionService *SessionService
+	memoryService  *TrajectoryMemoryService
 	meshPublisher  *livectx.MeshPublisher
 	snapshotStore  *SnapshotStore
 
@@ -44,6 +47,8 @@ func NewTaskExecutorService(
 	githubService *GitHubService,
 	linearService *LinearService,
 	contextService *ContextService,
+	sessionService *SessionService,
+	memoryService *TrajectoryMemoryService,
 	meshPublisher *livectx.MeshPublisher,
 	snapshotStore *SnapshotStore,
 ) *TaskExecutorService {
@@ -55,6 +60,8 @@ func NewTaskExecutorService(
 		githubService:  githubService,
 		linearService:  linearService,
 		contextService: contextService,
+		sessionService: sessionService,
+		memoryService:  memoryService,
 		meshPublisher:  meshPublisher,
 		snapshotStore:  snapshotStore,
 		activeTasks:    make(map[string]context.CancelFunc),
@@ -103,6 +110,84 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		}
 	}
 
+	var (
+		session         *models.AgentSession
+		initialSHA      string
+		retrievedTips   []RetrievedTip
+		guidanceSection string
+		envStateSection string
+	)
+
+	recordBundle := func(step, status, summary string, contextDiff, decisionDiff map[string]interface{}, testResults []models.TestResult) {
+		if e.sessionService == nil || session == nil {
+			return
+		}
+		if decisionDiff == nil {
+			decisionDiff = map[string]interface{}{}
+		}
+		if contextDiff == nil {
+			contextDiff = map[string]interface{}{}
+		}
+		decisionDiff["event"] = step
+		if summary != "" && decisionDiff["summary"] == nil {
+			decisionDiff["summary"] = summary
+		}
+		bundle := &models.ChangeBundle{
+			SessionID:    session.ID,
+			ContextDiff:  contextDiff,
+			DecisionDiff: decisionDiff,
+			TestResults:  testResults,
+			Status:       status,
+		}
+		if _, err := e.sessionService.CreateBundle(ctx, bundle); err != nil {
+			log.Printf("[executor] failed to create change bundle for %s: %v", step, err)
+		}
+	}
+
+	finalizeSession := func(status string) {
+		if e.sessionService == nil || session == nil {
+			return
+		}
+		if err := e.sessionService.CloseSession(ctx, session.ID, status); err != nil {
+			log.Printf("[executor] failed to close session %s: %v", session.ID, err)
+		}
+	}
+
+	runMemoryPipeline := func() {
+		if e.memoryService == nil || task.RepoFullName == "" {
+			return
+		}
+		if _, err := e.memoryService.analysisService.AnalyzeTask(ctx, orgID, taskID); err != nil {
+			log.Printf("[executor] failed to analyze trajectory for task %s: %v", taskID, err)
+		}
+		generatedTips, genErr := e.memoryService.GenerateTipsForTask(ctx, orgID, taskID)
+		if genErr != nil {
+			log.Printf("[executor] failed to generate trajectory memory for task %s: %v", taskID, genErr)
+			return
+		}
+		if syncErr := e.memoryService.SyncEmbeddingsForTips(ctx, generatedTips); syncErr != nil {
+			log.Printf("[executor] failed to sync embeddings for task %s: %v", taskID, syncErr)
+		}
+		if len(generatedTips) > 0 {
+			e.taskService.addLog(ctx, taskID, "trajectory_memory_generated", "completed",
+				fmt.Sprintf("Generated %d durable guidance tip(s)", len(generatedTips)), map[string]interface{}{
+					"tip_count": len(generatedTips),
+				})
+		}
+	}
+
+	failExecution := func(message string) {
+		recordBundle("task_failed", "failed", message, map[string]interface{}{
+			"outcome": "failed",
+		}, map[string]interface{}{
+			"outcome":           "failed",
+			"failure_signature": normalizedKey(message),
+		}, nil)
+		finalizeSession("failed")
+		e.failTask(ctx, orgID, taskID, message)
+		runMemoryPipeline()
+	}
+
 	// ── Step 1: Provision or reuse environment ──
 	e.taskService.addLog(ctx, taskID, "provisioning_env", "started", "Looking for environment...", nil)
 
@@ -141,7 +226,7 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 			RepoFullName:  task.RepoFullName,
 		})
 		if createErr != nil {
-			e.failTask(ctx, orgID, taskID, fmt.Sprintf("Failed to provision environment: %v", createErr))
+			failExecution(fmt.Sprintf("Failed to provision environment: %v", createErr))
 			return
 		}
 
@@ -154,7 +239,7 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 
 	if !reusedEnv || newEnv.Status != "running" {
 		if !e.waitForEnvReady(ctx, newEnv.ID, 5*time.Minute) {
-			e.failTask(ctx, orgID, taskID, "Environment failed to become ready within 5 minutes")
+			failExecution("Environment failed to become ready within 5 minutes")
 			if !reusedEnv {
 				e.cleanupEnv(orgID, newEnv.ID)
 			}
@@ -164,20 +249,20 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 
 	runningEnv, _ := e.envService.GetEnvironment(ctx, newEnv.ID)
 	if runningEnv == nil || runningEnv.ClusterName == "" {
-		e.failTask(ctx, orgID, taskID, "Environment has no provider reference")
+		failExecution("Environment has no provider reference")
 		e.cleanupEnv(orgID, newEnv.ID)
 		return
 	}
 
 	provider, err := e.envService.GetProviderByName(runningEnv.Provider)
 	if err != nil {
-		e.failTask(ctx, orgID, taskID, fmt.Sprintf("Provider unavailable: %v", err))
+		failExecution(fmt.Sprintf("Provider unavailable: %v", err))
 		e.cleanupEnv(orgID, newEnv.ID)
 		return
 	}
 	executor, ok := env.AsRemoteExecutor(provider)
 	if !ok {
-		e.failTask(ctx, orgID, taskID, "Provider does not support remote execution")
+		failExecution("Provider does not support remote execution")
 		e.cleanupEnv(orgID, newEnv.ID)
 		return
 	}
@@ -185,7 +270,7 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 	// Wait for SSM agent, then for cloud-init to finish (Docker install, container start)
 	e.taskService.addLog(ctx, taskID, "waiting_for_ssm", "started", "Waiting for instance to accept commands...", nil)
 	if err := executor.WaitForReady(ctx, runningEnv.ClusterName, 5*time.Minute); err != nil {
-		e.failTask(ctx, orgID, taskID, fmt.Sprintf("Instance never became SSM-ready: %v", err))
+		failExecution(fmt.Sprintf("Instance never became SSM-ready: %v", err))
 		e.cleanupEnv(orgID, newEnv.ID)
 		return
 	}
@@ -204,7 +289,7 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		time.Sleep(10 * time.Second)
 	}
 	if !dockerReady {
-		e.failTask(ctx, orgID, taskID, "Cloud-init did not complete within 5 minutes (Docker not installed)")
+		failExecution("Cloud-init did not complete within 5 minutes (Docker not installed)")
 		e.cleanupEnv(orgID, newEnv.ID)
 		return
 	}
@@ -234,7 +319,7 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 
 			output, cloneErr := e.execInContainer(ctx, executor, runningEnv.ClusterName, cloneScript, 5*time.Minute)
 			if cloneErr != nil || !strings.Contains(output, "CLONE_OK") {
-				e.failTask(ctx, orgID, taskID, fmt.Sprintf("Repo clone failed: %v (%s)", cloneErr, truncate(output, 500)))
+				failExecution(fmt.Sprintf("Repo clone failed: %v (%s)", cloneErr, truncate(output, 500)))
 				e.cleanupEnv(orgID, newEnv.ID)
 				return
 			}
@@ -254,18 +339,87 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		}
 	}
 
-	// ── Step 3: Load existing context and write task prompt ──
-	var existingContext string
-	if e.contextService != nil && task.RepoFullName != "" {
-		if ctxObj, err := e.contextService.GetContext(ctx, orgID, baseBranch); err == nil && ctxObj != nil {
-			existingContext = e.formatContextForPrompt(ctxObj)
+	if repoCloned {
+		shaOut, _ := e.execInContainer(ctx, executor, runningEnv.ClusterName,
+			"cd /workspace/repo && git rev-parse HEAD 2>/dev/null", 15*time.Second)
+		initialSHA = strings.TrimSpace(shaOut)
+	}
+
+	if e.sessionService != nil {
+		sessionModel, sessionErr := e.sessionService.CreateSession(ctx, &models.AgentSession{
+			TaskID:        task.ID,
+			OrgID:         orgID,
+			AgentRole:     "coder",
+			Scope:         models.SessionScope{},
+			InitialSHA:    initialSHA,
+			BranchName:    baseBranch,
+			EnvironmentID: newEnv.ID,
+			Status:        "active",
+		})
+		if sessionErr != nil {
+			log.Printf("[executor] failed to create agent session for task %s: %v", taskID, sessionErr)
+		} else {
+			session = sessionModel
+			e.taskService.addLog(ctx, taskID, "session_started", "completed", fmt.Sprintf("Trajectory session %s created", session.ID[:8]), map[string]interface{}{
+				"session_id": session.ID,
+			})
 		}
 	}
 
-	taskPrompt := e.buildTaskPrompt(task, settings)
-	if existingContext != "" {
-		taskPrompt += "\n\n" + existingContext
+	// ── Step 3: Load environment state, seed memory, and build prompt ──
+	if e.contextService != nil && task.RepoFullName != "" {
+		if ctxObj, err := e.contextService.GetRepoContext(ctx, orgID, task.RepoFullName, baseBranch); err == nil && ctxObj != nil {
+			envStateSection = e.formatEnvironmentStateForPrompt(ctxObj)
+			if e.memoryService != nil {
+				if seedErr := e.memoryService.SeedTipsFromContext(ctx, task.RepoFullName, baseBranch, ctxObj); seedErr != nil {
+					log.Printf("[executor] failed to seed memory from context: %v", seedErr)
+				}
+			}
+		}
 	}
+
+	if e.memoryService != nil && task.RepoFullName != "" {
+		guidance, guidanceErr := e.memoryService.RetrieveGuidance(ctx, MemoryRetrieveRequest{
+			OrgID:           orgID,
+			RepoFullName:    task.RepoFullName,
+			Branch:          baseBranch,
+			TaskID:          task.ID,
+			SessionID:       sessionIDValue(session),
+			TaskTitle:       task.Title,
+			TaskDescription: task.Description,
+			TaskPrompt:      task.Prompt,
+			Limit:           7,
+		})
+		if guidanceErr != nil {
+			log.Printf("[executor] failed to retrieve guidance: %v", guidanceErr)
+		} else {
+			retrievedTips = guidance
+			guidanceSection = e.memoryService.FormatGuidanceForPrompt(guidance)
+		}
+	}
+
+	taskPrompt := e.buildTaskPrompt(task, settings, guidanceSection, envStateSection)
+
+	e.taskService.addLog(ctx, taskID, "task_prompt_built", "completed", truncate(taskPrompt, 4000), map[string]interface{}{
+		"prompt_length":   len(taskPrompt),
+		"has_guidance":    guidanceSection != "",
+		"guidance_count":  len(retrievedTips),
+		"has_env_state":   envStateSection != "",
+		"has_description": task.Description != "",
+		"has_parent_task": task.ParentTaskID != "",
+		"repo":            task.RepoFullName,
+		"base_branch":     baseBranch,
+	})
+	recordBundle("task_prompt_built", "completed", "Prompt prepared with retrieved guidance and environment state", map[string]interface{}{
+		"prompt_length":   len(taskPrompt),
+		"guidance_count":  len(retrievedTips),
+		"has_env_state":   envStateSection != "",
+		"initial_sha":     initialSHA,
+		"retrieval_scope": task.RepoFullName,
+	}, map[string]interface{}{
+		"outcome": "completed",
+		"subtask": "prompt_preparation",
+	}, nil)
 
 	writePromptScript := fmt.Sprintf(`mkdir -p /gradient; cat > /gradient/task-prompt.md << 'GRADIENT_EOF'
 %s
@@ -273,12 +427,51 @@ GRADIENT_EOF
 echo "PROMPT_OK"`, taskPrompt)
 	e.execInContainer(ctx, executor, runningEnv.ClusterName, writePromptScript, 30*time.Second)
 
+	guidanceSnapshot := map[string]interface{}{
+		"retrieved_at": time.Now().UTC().Format(time.RFC3339),
+		"tips":         []map[string]interface{}{},
+	}
+	if e.memoryService != nil {
+		guidanceSnapshot = e.memoryService.BuildGuidanceSnapshot(retrievedTips)
+	}
+	guidanceJSON, _ := json.MarshalIndent(guidanceSnapshot, "", "  ")
+
+	sessionSnapshot := map[string]interface{}{
+		"task_id":        task.ID,
+		"repo_full_name": task.RepoFullName,
+		"branch":         baseBranch,
+	}
+	if session != nil {
+		sessionSnapshot["session_id"] = session.ID
+	}
+	sessionJSON, _ := json.MarshalIndent(sessionSnapshot, "", "  ")
+
+	writeTrajectoryFilesScript := fmt.Sprintf(`mkdir -p /gradient/context; cat > /gradient/context/memory.json << 'GRADIENT_MEMORY'
+%s
+GRADIENT_MEMORY
+cat > /gradient/context/session.json << 'GRADIENT_SESSION'
+%s
+GRADIENT_SESSION
+echo "TRAJECTORY_FILES_OK"`, string(guidanceJSON), string(sessionJSON))
+	e.execInContainer(ctx, executor, runningEnv.ClusterName, writeTrajectoryFilesScript, 30*time.Second)
+
 	// ── Step 3.5: Set up MCP context server for cross-agent communication ──
 	mcpSetupScript := `mkdir -p /gradient/context && cat > /gradient/mcp-context.js << 'MCPEOF'
 const fs = require('fs');
 const readline = require('readline');
 const LIVE = '/gradient/context/live.json';
 const OUTBOX = '/gradient/context/outbox.jsonl';
+const MEMORY = '/gradient/context/memory.json';
+const SESSION = '/gradient/context/session.json';
+const CURSOR = '/gradient/context/read_cursor.json';
+const FLAG = '/gradient/context/has_updates';
+
+// Watch live.json for changes and set the update flag
+try {
+  fs.watchFile(LIVE, { interval: 2000 }, () => {
+    try { fs.writeFileSync(FLAG, Date.now().toString()); } catch(_) {}
+  });
+} catch(_) {}
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', line => {
@@ -292,11 +485,13 @@ rl.on('line', line => {
 });
 
 function handle(req) {
-  if (req.method === 'initialize') return {jsonrpc:"2.0",id:req.id,result:{protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"gradient-context",version:"0.1.0"}}};
+  if (req.method === 'initialize') return {jsonrpc:"2.0",id:req.id,result:{protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"gradient-context",version:"0.2.0"}}};
   if (req.method === 'notifications/initialized') return null;
   if (req.method === 'tools/list') return {jsonrpc:"2.0",id:req.id,result:{tools:[
-    {name:"get_context_updates",description:"Check for updates from other agents working on the same task. Returns packages installed, errors encountered, patterns learned. Call periodically.",inputSchema:{type:"object",properties:{}}},
-    {name:"publish_event",description:"Share a discovery with other agents: errors, patterns, packages, decisions.",inputSchema:{type:"object",properties:{event_type:{type:"string",description:"error_encountered, pattern_learned, package_installed, config_changed, decision_made"},message:{type:"string",description:"Description"},data:{type:"object",description:"Structured data"}},required:["event_type","message"]}}
+    {name:"get_context_updates",description:"Return unread operational deltas from the live context mesh, including peer package changes, config updates, contract changes, and urgent issues.",inputSchema:{type:"object",properties:{}}},
+    {name:"get_memory_guidance",description:"Inspect the retrieved durable guidance for this task or a specific subtask before making changes.",inputSchema:{type:"object",properties:{subtask:{type:"string",description:"Optional subtask name"},failure_signature:{type:"string",description:"Optional failure signature to filter recovery tips"},goal:{type:"string",description:"Optional current goal or intent for finer filtering"}},required:[]}},
+    {name:"publish_event",description:"Share a structured discovery with other agents. Use for decisions, errors, package installs, config changes, contract updates, or custom telemetry.",inputSchema:{type:"object",properties:{event_type:{type:"string",description:"error_encountered, decision_made, package_installed, config_changed, contract_updated, custom"},message:{type:"string",description:"Short summary"},subtask:{type:"string",description:"Related subtask name"},outcome:{type:"string",description:"completed, failed, blocked, success"},failure_signature:{type:"string",description:"Stable failure signature"},related_files:{type:"array",items:{type:"string"},description:"Related files"},data:{type:"object",description:"Additional structured data"}},required:["event_type"]}},
+    {name:"mark_subtask",description:"Record a subtask boundary and its outcome so the trajectory memory pipeline can learn from it.",inputSchema:{type:"object",properties:{name:{type:"string",description:"Subtask name"},outcome:{type:"string",description:"started, completed, failed, blocked"},summary:{type:"string",description:"Short result summary"},failure_signature:{type:"string",description:"Stable failure signature"},related_files:{type:"array",items:{type:"string"},description:"Files touched or relevant"}},required:["name","outcome"]}}
   ]}};
   if (req.method === 'tools/call') return toolCall(req);
   return {jsonrpc:"2.0",id:req.id,error:{code:-32601,message:"method not found: "+req.method}};
@@ -307,49 +502,144 @@ function toolCall(req) {
   const name = p.name;
   const args = p.arguments || {};
   if (name === 'get_context_updates') return getUpdates(req.id);
+  if (name === 'get_memory_guidance') return getMemoryGuidance(req.id, args);
   if (name === 'publish_event') return publish(req.id, args);
+  if (name === 'mark_subtask') return markSubtask(req.id, args);
   return {jsonrpc:"2.0",id:req.id,error:{code:-32602,message:"unknown tool: "+name}};
 }
 
+function readJSON(path, fallback) {
+  try { return JSON.parse(fs.readFileSync(path, 'utf8')); } catch(_) { return fallback; }
+}
+
+function writeJSON(path, value) {
+  try { fs.writeFileSync(path, JSON.stringify(value, null, 2)); } catch(_) {}
+}
+
+function currentSession() {
+  return readJSON(SESSION, {});
+}
+
 function getUpdates(id) {
-  try {
-    const data = JSON.parse(fs.readFileSync(LIVE, 'utf8'));
-    let out = '## Context Updates from Other Agents\n\n';
-    if (data.last_update) out += 'Last update: ' + data.last_update + '\n\n';
-    if (data.packages && Object.keys(data.packages).length) {
-      out += '### Packages Installed by Peers\n';
-      for (const [n,v] of Object.entries(data.packages)) out += '- ' + n + ': ' + v + '\n';
-      out += '\n';
-    }
-    if (data.errors && data.errors.length) {
-      out += '### Errors (' + data.errors.length + ')\n';
-      data.errors.slice(-10).forEach(e => out += '- ' + JSON.stringify(e) + '\n');
-      out += '\n';
-    }
-    if (data.patterns && Object.keys(data.patterns).length) {
-      out += '### Patterns\n';
-      for (const [k,v] of Object.entries(data.patterns)) out += '- ' + k + ': ' + v + '\n';
-      out += '\n';
-    }
-    const evts = data.events || [];
-    if (evts.length) {
-      const show = evts.slice(-10);
-      out += '### Recent Events (' + evts.length + ' total, last ' + show.length + ')\n';
-      show.forEach(e => out += '- ' + JSON.stringify(e) + '\n');
-    }
-    return tr(id, out || 'No updates from other agents yet.');
-  } catch(e) { return tr(id, 'No context updates available yet.'); }
+  const live = readJSON(LIVE, {packages:{}, configs:{}, contracts:{}, urgent_issues:[], recent_updates:[], last_update:''});
+  const cursor = readJSON(CURSOR, {last_seq: 0});
+  const updates = Array.isArray(live.recent_updates) ? live.recent_updates.filter(u => Number(u.seq || 0) > Number(cursor.last_seq || 0)) : [];
+  const maxSeq = updates.reduce((max, item) => Math.max(max, Number(item.seq || 0)), Number(cursor.last_seq || 0));
+  writeJSON(CURSOR, {last_seq: maxSeq, read_at: new Date().toISOString()});
+  try { fs.unlinkSync(FLAG); } catch(_) {}
+
+  if (!updates.length && !(live.urgent_issues || []).length) {
+    return tr(id, 'No new operational updates from peers.');
+  }
+
+  let out = '## Operational Updates\n\n';
+  if (live.last_update) out += 'Last update: ' + live.last_update + '\n\n';
+  if (Object.keys(live.packages || {}).length) {
+    out += '### Shared Packages\n';
+    for (const [n,v] of Object.entries(live.packages)) out += '- ' + n + ': ' + v + '\n';
+    out += '\n';
+  }
+  if (Object.keys(live.configs || {}).length) {
+    out += '### Shared Config\n';
+    for (const [k,v] of Object.entries(live.configs)) out += '- ' + k + ' = ' + v + '\n';
+    out += '\n';
+  }
+  if (Object.keys(live.contracts || {}).length) {
+    out += '### Contract Changes\n';
+    for (const [k,v] of Object.entries(live.contracts)) out += '- ' + k + ': ' + v + '\n';
+    out += '\n';
+  }
+  const urgent = Array.isArray(live.urgent_issues) ? live.urgent_issues.slice(-5) : [];
+  if (urgent.length) {
+    out += '### Urgent Peer Issues\n';
+    urgent.forEach(item => out += '- [' + (item.type || 'update') + '] ' + (item.summary || JSON.stringify(item)) + '\n');
+    out += '\n';
+  }
+  if (updates.length) {
+    out += '### New Unread Updates\n';
+    updates.forEach(item => out += '- [' + (item.type || 'update') + '] ' + (item.summary || JSON.stringify(item)) + '\n');
+  }
+  return tr(id, out.trim());
 }
 
 function publish(id, args) {
-  if (!args.event_type || !args.message) return er(id, 'event_type and message required');
-  const entry = {type:args.event_type, message:args.message, timestamp:new Date().toISOString()};
-  if (args.data) entry.data = args.data;
+  if (!args.event_type) return er(id, 'event_type is required');
+  const session = currentSession();
+  const payload = Object.assign({}, args.data || {});
+  if (session.task_id && payload.task_id === undefined) payload.task_id = session.task_id;
+  if (session.session_id && payload.session_id === undefined) payload.session_id = session.session_id;
+  if (args.subtask) payload.subtask = args.subtask;
+  if (args.outcome) payload.outcome = args.outcome;
+  if (args.failure_signature) payload.failure_signature = args.failure_signature;
+  if (Array.isArray(args.related_files)) payload.related_files = args.related_files;
+  const entry = {
+    type: args.event_type,
+    message: args.message || args.summary || args.subtask || 'Structured event',
+    timestamp: new Date().toISOString(),
+    data: payload
+  };
   try {
     fs.mkdirSync('/gradient/context', {recursive:true});
     fs.appendFileSync(OUTBOX, JSON.stringify(entry) + '\n');
-    return tr(id, 'Event published: [' + args.event_type + '] ' + args.message);
+    return tr(id, 'Event published: [' + args.event_type + '] ' + entry.message);
   } catch(e) { return er(id, 'Write failed: ' + e.message); }
+}
+
+function getMemoryGuidance(id, args) {
+  const memory = readJSON(MEMORY, {tips: []});
+  let tips = Array.isArray(memory.tips) ? memory.tips.slice() : [];
+  const subtask = String(args.subtask || '').toLowerCase();
+  const failure = String(args.failure_signature || '').toLowerCase();
+  const goal = String(args.goal || '').toLowerCase();
+  if (failure) {
+    const exact = tips.filter(t => String(t.failure_signature || '').toLowerCase() === failure);
+    if (exact.length) tips = exact;
+  }
+  if (subtask) {
+    const filtered = tips.filter(t => [t.title, t.content, t.trigger_condition].some(v => String(v || '').toLowerCase().includes(subtask)));
+    if (filtered.length) tips = filtered;
+  }
+  if (goal) {
+    const filtered = tips.filter(t => [t.title, t.content, t.trigger_condition].some(v => String(v || '').toLowerCase().includes(goal)));
+    if (filtered.length) tips = filtered;
+  }
+  if (!tips.length) return tr(id, 'No retrieved memory guidance matched this request.');
+  let out = '## Retrieved Memory Guidance\n\n';
+  tips.slice(0, 5).forEach(tip => {
+    out += '[' + String(tip.priority || 'medium').toUpperCase() + '][' + String(tip.type || 'strategy').toUpperCase() + '] ' + String(tip.title || 'Guidance') + '\n';
+    out += '- Guidance: ' + String(tip.content || '') + '\n';
+    if (tip.reason) out += '- Why selected: ' + String(tip.reason) + '\n';
+    if (tip.trigger_condition) out += '- Apply when: ' + String(tip.trigger_condition) + '\n';
+    if (Array.isArray(tip.action_steps)) tip.action_steps.forEach((step, idx) => out += '  ' + (idx + 1) + '. ' + step + '\n');
+    out += '\n';
+  });
+  return tr(id, out.trim());
+}
+
+function markSubtask(id, args) {
+  if (!args.name || !args.outcome) return er(id, 'name and outcome are required');
+  const session = currentSession();
+  const entry = {
+    type: 'subtask_marked',
+    message: args.name + ': ' + args.outcome,
+    timestamp: new Date().toISOString(),
+    data: {
+      task_id: session.task_id,
+      session_id: session.session_id,
+      subtask: args.name,
+      outcome: args.outcome,
+      summary: args.summary || '',
+      failure_signature: args.failure_signature || '',
+      related_files: Array.isArray(args.related_files) ? args.related_files : []
+    }
+  };
+  try {
+    fs.mkdirSync('/gradient/context', {recursive:true});
+    fs.appendFileSync(OUTBOX, JSON.stringify(entry) + '\n');
+    return tr(id, 'Subtask recorded: ' + args.name + ' (' + args.outcome + ')');
+  } catch(e) {
+    return er(id, 'Write failed: ' + e.message);
+  }
 }
 
 function tr(id, text) { return {jsonrpc:"2.0",id,result:{content:[{type:"text",text}]}}; }
@@ -364,7 +654,14 @@ echo "MCP_SETUP_OK"`
 	mcpOut, mcpErr := e.execInContainer(ctx, executor, runningEnv.ClusterName, mcpSetupScript, 30*time.Second)
 	mcpReady := mcpErr == nil && strings.Contains(mcpOut, "MCP_SETUP_OK")
 	if mcpReady {
-		e.taskService.addLog(ctx, taskID, "mcp_setup", "completed", "MCP context server configured", nil)
+		e.taskService.addLog(ctx, taskID, "mcp_setup", "completed", "MCP context server configured", map[string]interface{}{
+			"config":           `{"mcpServers":{"gradient-context":{"command":"node","args":["/gradient/mcp-context.js"]}}}`,
+			"tools_available":  []string{"get_context_updates", "get_memory_guidance", "publish_event", "mark_subtask"},
+			"live_json_path":   "/gradient/context/live.json",
+			"outbox_path":      "/gradient/context/outbox.jsonl",
+			"memory_json_path": "/gradient/context/memory.json",
+			"session_path":     "/gradient/context/session.json",
+		})
 	} else {
 		log.Printf("[executor] MCP setup warning: %v (%s)", mcpErr, truncate(mcpOut, 200))
 		e.taskService.addLog(ctx, taskID, "mcp_setup", "failed", "MCP context server setup failed (continuing without)", nil)
@@ -395,7 +692,7 @@ echo "MCP_SETUP_OK"`
 			5*time.Minute)
 		if installErr != nil || !strings.Contains(installOut, "INSTALL_OK") {
 			log.Printf("[executor] Claude CLI install failed: %v (%s)", installErr, truncate(installOut, 500))
-			e.failTask(ctx, orgID, taskID, fmt.Sprintf("Claude CLI install failed: %s", truncate(installOut, 300)))
+			failExecution(fmt.Sprintf("Claude CLI install failed: %s", truncate(installOut, 300)))
 			e.cleanupEnv(orgID, newEnv.ID)
 			return
 		}
@@ -405,6 +702,40 @@ echo "MCP_SETUP_OK"`
 	}
 
 	claudeScript := e.buildClaudeScript(claudeCfg, repoCloned, mcpReady)
+
+	workDir := "/workspace"
+	if repoCloned {
+		workDir = "/workspace/repo"
+	}
+	turnsPerIter := claudeCfg.MaxTurns
+	if turnsPerIter > 15 {
+		turnsPerIter = 15
+	}
+	maxIter := (claudeCfg.MaxTurns + turnsPerIter - 1) / turnsPerIter
+	if maxIter < 1 {
+		maxIter = 1
+	}
+	if maxIter > 10 {
+		maxIter = 10
+	}
+	mcpFlagStr := ""
+	if mcpReady {
+		mcpFlagStr = "--mcp-config /gradient/mcp-config.json "
+	}
+	redactedCmd := fmt.Sprintf(
+		`export ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose [context-aware loop: up to %d iterations]`,
+		workDir, claudeCfg.Model, turnsPerIter, strings.Join(claudeCfg.AllowedTools, ","), mcpFlagStr, maxIter)
+	e.taskService.addLog(ctx, taskID, "claude_invocation", "started", redactedCmd, map[string]interface{}{
+		"model":               claudeCfg.Model,
+		"max_turns_total":     claudeCfg.MaxTurns,
+		"turns_per_iteration": turnsPerIter,
+		"max_iterations":      maxIter,
+		"allowed_tools":       claudeCfg.AllowedTools,
+		"mcp_enabled":         mcpReady,
+		"work_dir":            workDir,
+		"repo_cloned":         repoCloned,
+	})
+
 	log.Printf("[executor] Running Claude Code for task %s...", taskID[:8])
 	claudeOutput, claudeErr := e.execInContainer(ctx, executor, runningEnv.ClusterName, claudeScript, 45*time.Minute)
 	if claudeErr != nil {
@@ -412,8 +743,22 @@ echo "MCP_SETUP_OK"`
 	}
 	log.Printf("[executor] Claude Code output for task %s: %s", taskID[:8], truncate(claudeOutput, 1000))
 
+	e.taskService.addLog(ctx, taskID, "claude_output", "completed", truncate(claudeOutput, 10000), map[string]interface{}{
+		"output_bytes": len(claudeOutput),
+		"truncated":    len(claudeOutput) > 10000,
+		"had_error":    claudeErr != nil,
+	})
 	e.taskService.addLog(ctx, taskID, "claude_done", "completed",
 		fmt.Sprintf("Claude Code finished (%d bytes output)", len(claudeOutput)), nil)
+	recordBundle("claude_done", "completed", "Claude execution finished", map[string]interface{}{
+		"output_bytes": len(claudeOutput),
+		"had_error":    claudeErr != nil,
+		"mcp_enabled":  mcpReady,
+	}, map[string]interface{}{
+		"outcome": "completed",
+		"subtask": "claude_execution",
+		"summary": truncate(e.extractSummary(claudeOutput), 500),
+	}, nil)
 
 	// ── Step 5: Get commit SHA and push ──
 	var commitSHA, prURL string
@@ -423,28 +768,64 @@ echo "MCP_SETUP_OK"`
 			"cd /workspace/repo && git rev-parse HEAD 2>/dev/null", 15*time.Second)
 		commitSHA = strings.TrimSpace(shaOut)
 
-		// Check if Claude actually made any commits
+		// Check if Claude actually made any new commits on the task branch
 		diffCheck, _ := e.execInContainer(ctx, executor, runningEnv.ClusterName,
-			fmt.Sprintf("cd /workspace/repo && git log --oneline %s..HEAD 2>/dev/null || echo NO_NEW_COMMITS", taskBranch), 15*time.Second)
-		log.Printf("[executor] Git diff check for task %s: %s", taskID[:8], truncate(strings.TrimSpace(diffCheck), 300))
+			fmt.Sprintf(`cd /workspace/repo && git log --oneline origin/%s..HEAD 2>/dev/null | head -20`, baseBranch), 15*time.Second)
+		diffCheckTrimmed := strings.TrimSpace(diffCheck)
+		log.Printf("[executor] Git diff check for task %s: %s", taskID[:8], truncate(diffCheckTrimmed, 300))
+		hasNewCommits := diffCheckTrimmed != "" && diffCheckTrimmed != "NO_NEW_COMMITS"
 
-		pushScript := fmt.Sprintf("cd /workspace/repo && git push origin %s 2>&1 || echo 'PUSH_FAILED'", taskBranch)
-		pushOut, _ := e.execInContainer(ctx, executor, runningEnv.ClusterName, pushScript, 2*time.Minute)
-		if strings.Contains(pushOut, "PUSH_FAILED") {
-			log.Printf("[executor] git push warning: %s", truncate(pushOut, 300))
+		pushSucceeded := false
+		if hasNewCommits {
+			pushScript := fmt.Sprintf("cd /workspace/repo && git push origin %s 2>&1 && echo 'PUSH_OK'", taskBranch)
+			pushOut, pushErr := e.execInContainer(ctx, executor, runningEnv.ClusterName, pushScript, 2*time.Minute)
+			if pushErr != nil || !strings.Contains(pushOut, "PUSH_OK") {
+				log.Printf("[executor] git push failed for task %s: %v (%s)", taskID[:8], pushErr, truncate(pushOut, 300))
+				e.taskService.addLog(ctx, taskID, "push_failed", "failed",
+					fmt.Sprintf("git push failed: %s", truncate(pushOut, 500)), nil)
+				recordBundle("push_failed", "failed", truncate(pushOut, 500), map[string]interface{}{
+					"commit_sha": commitSHA,
+				}, map[string]interface{}{
+					"outcome":           "failed",
+					"subtask":           "git_push",
+					"failure_signature": normalizedKey(pushOut),
+				}, nil)
+			} else {
+				pushSucceeded = true
+				log.Printf("[executor] git push for task %s: %s", taskID[:8], truncate(pushOut, 300))
+				recordBundle("push_completed", "completed", "Changes pushed to remote branch", map[string]interface{}{
+					"commit_sha": commitSHA,
+				}, map[string]interface{}{
+					"outcome": "completed",
+					"subtask": "git_push",
+				}, nil)
+			}
 		} else {
-			log.Printf("[executor] git push for task %s: %s", taskID[:8], truncate(pushOut, 300))
+			log.Printf("[executor] No new commits for task %s, skipping push", taskID[:8])
+			e.taskService.addLog(ctx, taskID, "push_skipped", "completed",
+				"No new commits were made by Claude, skipping push and PR", nil)
 		}
 
-		// Create PR
-		if settings.AutoCreatePR && task.RepoFullName != "" {
+		if settings.AutoCreatePR && task.RepoFullName != "" && pushSucceeded {
 			e.taskService.addLog(ctx, taskID, "creating_pr", "started", "Creating pull request...", nil)
 			prURL, err = e.createPR(ctx, orgID, task, taskBranch, baseBranch)
 			if err != nil {
 				log.Printf("[executor] PR creation failed: %v", err)
 				e.taskService.addLog(ctx, taskID, "pr_failed", "failed", fmt.Sprintf("PR creation failed: %v", err), nil)
+				recordBundle("pr_failed", "failed", err.Error(), nil, map[string]interface{}{
+					"outcome":           "failed",
+					"subtask":           "pull_request",
+					"failure_signature": normalizedKey(err.Error()),
+				}, nil)
 			} else {
 				e.taskService.addLog(ctx, taskID, "pr_created", "completed", fmt.Sprintf("PR: %s", prURL), nil)
+				recordBundle("pr_created", "completed", "Pull request created", map[string]interface{}{
+					"pr_url":     prURL,
+					"commit_sha": commitSHA,
+				}, map[string]interface{}{
+					"outcome": "completed",
+					"subtask": "pull_request",
+				}, nil)
 
 				if e.meshPublisher != nil {
 					prEvt, _ := livectx.NewEvent(livectx.EventPRCreated, orgID, baseBranch, newEnv.ID, map[string]interface{}{
@@ -459,6 +840,9 @@ echo "MCP_SETUP_OK"`
 					}
 				}
 			}
+		} else if settings.AutoCreatePR && !pushSucceeded && hasNewCommits {
+			e.taskService.addLog(ctx, taskID, "pr_skipped", "failed",
+				"Skipping PR creation because git push failed", nil)
 		}
 	}
 
@@ -493,6 +877,17 @@ echo "MCP_SETUP_OK"`
 		ContextSaved:  contextSaved,
 		SnapshotTaken: snapshotTaken,
 	})
+	recordBundle("task_completed", "completed", outputSummary, map[string]interface{}{
+		"commit_sha":     commitSHA,
+		"context_saved":  contextSaved,
+		"snapshot_taken": snapshotTaken,
+		"guidance_count": len(retrievedTips),
+	}, map[string]interface{}{
+		"outcome": "completed",
+		"subtask": "task",
+		"summary": outputSummary,
+	}, nil)
+	finalizeSession("completed")
 
 	if e.meshPublisher != nil {
 		evt, _ := livectx.NewEvent(livectx.EventCustom, orgID, baseBranch, newEnv.ID, map[string]interface{}{
@@ -516,6 +911,8 @@ echo "MCP_SETUP_OK"`
 	} else if settings.AutoDestroyEnv {
 		e.cleanupEnv(orgID, newEnv.ID)
 	}
+
+	runMemoryPipeline()
 
 	log.Printf("[executor] Task %s completed (PR: %s, SHA: %s)", taskID, prURL, commitSHA)
 }
@@ -568,7 +965,7 @@ func (e *TaskExecutorService) waitForEnvReady(ctx context.Context, envID string,
 	}
 }
 
-func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *models.TaskSettings) string {
+func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *models.TaskSettings, guidanceSection, envStateSection string) string {
 	var sb strings.Builder
 	sb.WriteString("# Task\n\n")
 	sb.WriteString(task.Title)
@@ -591,22 +988,38 @@ func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *
 	sb.WriteString("- Commit changes with a clear commit message\n")
 	sb.WriteString("- Do NOT push to remote (the orchestrator handles this)\n")
 
+	if guidanceSection != "" {
+		sb.WriteString("\n")
+		sb.WriteString(guidanceSection)
+		sb.WriteString("\n\n")
+	}
+	if envStateSection != "" {
+		sb.WriteString(envStateSection)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("\n## Context Awareness\n\n")
+	sb.WriteString("You have access to `get_context_updates`, `get_memory_guidance`, `publish_event`, and `mark_subtask` MCP tools.\n")
+	sb.WriteString("- Before starting a major subtask, call `get_memory_guidance` with the subtask name if you need targeted prior guidance.\n")
+	sb.WriteString("- Call `mark_subtask` when a subtask starts, completes, fails, or becomes blocked.\n")
+	sb.WriteString("**After completing each sub-task** (e.g., after a commit, after running tests, after installing packages), call `get_context_updates` to check for operational updates from the system or other agents.\n")
+	sb.WriteString("- If `get_context_updates` returns new information, incorporate it before proceeding.\n")
+	sb.WriteString("- Use `publish_event` to share important discoveries: errors encountered, package installs, configuration changes, contract updates, or key decisions.\n")
+
 	if task.ParentTaskID != "" {
 		sb.WriteString("\n## Cross-Agent Collaboration\n\n")
 		sb.WriteString("You are one of several agents working on this task in parallel. Other agents are handling different parts.\n")
-		sb.WriteString("- Use the `get_context_updates` tool periodically to check what other agents have done\n")
-		sb.WriteString("- Use the `publish_event` tool to share important discoveries, errors, or decisions\n")
-		sb.WriteString("- If another agent has installed packages or changed configs, take that into account\n")
-		sb.WriteString("- If you encounter an error that might affect other agents, publish it immediately\n")
+		sb.WriteString("- Call `get_context_updates` frequently — other agents may have installed packages, changed configs, or encountered errors that affect your work.\n")
+		sb.WriteString("- Publish events immediately when you make changes that could affect other agents, and mark subtask boundaries so the shared memory stays attributable.\n")
 	}
 
 	return sb.String()
 }
 
-func (e *TaskExecutorService) formatContextForPrompt(ctxObj *models.Context) string {
+func (e *TaskExecutorService) formatEnvironmentStateForPrompt(ctxObj *models.Context) string {
 	var sb strings.Builder
-	sb.WriteString("## Existing Context\n\n")
-	sb.WriteString("Previous work has been done on this branch. Here is the accumulated context:\n\n")
+	sb.WriteString("## Environment State\n\n")
+	sb.WriteString("This is replayable runtime state from previous work on this branch. Treat it as environment context, not as task strategy.\n\n")
 	if len(ctxObj.InstalledPackages) > 0 {
 		sb.WriteString("**Installed packages:** ")
 		for i, pkg := range ctxObj.InstalledPackages {
@@ -617,17 +1030,18 @@ func (e *TaskExecutorService) formatContextForPrompt(ctxObj *models.Context) str
 		}
 		sb.WriteString("\n\n")
 	}
-	if len(ctxObj.PreviousFailures) > 0 {
-		sb.WriteString("**Previous failures:**\n")
-		for _, f := range ctxObj.PreviousFailures {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", f.Test, f.Error))
+	if len(ctxObj.GlobalConfigs) > 0 {
+		sb.WriteString("**Environment config:**\n")
+		keys := make([]string, 0, len(ctxObj.GlobalConfigs))
+		for key := range ctxObj.GlobalConfigs {
+			keys = append(keys, key)
 		}
-		sb.WriteString("\n")
+		sort.Strings(keys)
+		for _, key := range firstNStrings(keys, 10) {
+			sb.WriteString(fmt.Sprintf("- %s=%s\n", key, ctxObj.GlobalConfigs[key]))
+		}
 	}
-	for k, v := range ctxObj.Patterns {
-		sb.WriteString(fmt.Sprintf("**Pattern** %s: %v\n", k, v))
-	}
-	return sb.String()
+	return strings.TrimSpace(sb.String())
 }
 
 func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRepo bool, mcpEnabled bool) string {
@@ -642,10 +1056,51 @@ func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRep
 		mcpFlag = "--mcp-config /gradient/mcp-config.json "
 	}
 
-	return fmt.Sprintf(
-		`export ANTHROPIC_API_KEY="%s" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1; exit 0`,
-		cfg.AnthropicAPIKey, workDir, cfg.Model, cfg.MaxTurns, tools, mcpFlag,
+	turnsPerIteration := cfg.MaxTurns
+	if turnsPerIteration > 15 {
+		turnsPerIteration = 15
+	}
+	maxIterations := (cfg.MaxTurns + turnsPerIteration - 1) / turnsPerIteration
+	if maxIterations < 1 {
+		maxIterations = 1
+	}
+	if maxIterations > 10 {
+		maxIterations = 10
+	}
+
+	return fmt.Sprintf(`export ANTHROPIC_API_KEY="%s" && cd %s
+
+# Initial run
+claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1
+
+ITER=1
+MAX_ITER=%d
+FLAG="/gradient/context/has_updates"
+
+while [ $ITER -lt $MAX_ITER ]; do
+  if [ ! -f "$FLAG" ]; then
+    break
+  fi
+  rm -f "$FLAG"
+  echo "[gradient] Context update detected (iteration $((ITER+1))/$MAX_ITER), resuming..."
+  claude --resume -p "Operational updates are available. Call get_context_updates immediately, incorporate any critical peer changes, and continue from your current plan. If the update indicates a new failure mode, call get_memory_guidance before retrying." --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1
+  ITER=$((ITER+1))
+done
+
+echo "[gradient] Claude execution complete after $((ITER)) iteration(s)"
+exit 0`,
+		cfg.AnthropicAPIKey, workDir,
+		cfg.Model, turnsPerIteration, tools, mcpFlag,
+		maxIterations,
+		cfg.Model, turnsPerIteration, tools, mcpFlag,
 	)
+}
+
+func sessionIDValue(session *models.AgentSession) string {
+	if session == nil {
+		return ""
+	}
+	return session.ID
 }
 
 func (e *TaskExecutorService) createPR(ctx context.Context, orgID string, task *models.AgentTask, head, base string) (string, error) {

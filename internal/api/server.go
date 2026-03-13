@@ -55,10 +55,11 @@ type Server struct {
 	taskExecutor  *services.TaskExecutorService
 
 	// Agent-Native VCS
-	sessionService     *services.SessionService
-	mergeService       *services.MergeService
-	taskClassifier     *services.TaskClassifier
-	eventPropagation   *services.EventPropagationService
+	sessionService   *services.SessionService
+	memoryService    *services.TrajectoryMemoryService
+	mergeService     *services.MergeService
+	taskClassifier   *services.TaskClassifier
+	eventPropagation *services.EventPropagationService
 
 	// Rate limiting
 	rateLimiter *RateLimiter
@@ -203,16 +204,32 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	claudeService := services.NewClaudeService(database)
 	fmt.Println("[init] ✓ Claude Code service initialized")
 
+	embeddingProvider := services.NewEmbeddingProvider(
+		cfg.EmbeddingProvider,
+		cfg.OpenAIAPIKey,
+		cfg.OpenAIEmbeddingModel,
+		cfg.OpenAIEmbeddingBaseURL,
+		cfg.OpenAIEmbeddingDimensions,
+	)
+	if embeddingProvider.Enabled() {
+		fmt.Printf("[init] ✓ Embedding provider enabled (%s / %s)\n", embeddingProvider.ProviderName(), embeddingProvider.ModelName())
+	} else {
+		fmt.Println("[init] Embedding provider disabled")
+	}
+
+	// Agent-Native VCS services
+	sessionService := services.NewSessionService(database)
+	memoryService := services.NewTrajectoryMemoryService(database, contextService, sessionService, claudeService, embeddingProvider)
+	fmt.Println("[init] ✓ Trajectory memory service initialized")
+
 	// Task service (orchestrator)
 	taskService := services.NewTaskService(database, envService, claudeService, linearService, contextService, cfg.HetznerLocation)
 	fmt.Println("[init] ✓ Agent task service initialized")
 
 	taskExecutor := services.NewTaskExecutorService(
-		database, envService, claudeService, taskService, githubService, linearService, contextService, meshPublisher, snapshotStore,
+		database, envService, claudeService, taskService, githubService, linearService, contextService, sessionService, memoryService, meshPublisher, snapshotStore,
 	)
 
-	// Agent-Native VCS services
-	sessionService := services.NewSessionService(database)
 	mergeService := services.NewMergeService(database, sessionService, envService, meshPublisher)
 	taskClassifier := services.NewTaskClassifier(claudeService)
 	eventPropagation := services.NewEventPropagationService(database, sessionService, taskExecutor, meshPublisher, eventBus)
@@ -247,6 +264,12 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	idleMonitor.Start()
 	fmt.Println("[init] ✓ Environment idle monitor started (check every 5m, sleep after 30m)")
 
+	// Linear issue poller — fallback for when webhooks can't reach us (e.g. local dev)
+	if linearService.Configured() {
+		go startLinearPoller(linearService, taskService, taskExecutor, taskClassifier, repoService, 30*time.Second)
+		fmt.Println("[init] ✓ Linear issue poller started (every 30s)")
+	}
+
 	// Rate limiter
 	rateLimiter := NewRateLimiter(DefaultRateLimitConfig())
 
@@ -272,9 +295,10 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		taskService:      taskService,
 		taskExecutor:     taskExecutor,
 		sessionService:   sessionService,
+		memoryService:    memoryService,
 		mergeService:     mergeService,
 		taskClassifier:   taskClassifier,
-		eventPropagation:  eventPropagation,
+		eventPropagation: eventPropagation,
 		rateLimiter:      rateLimiter,
 	}
 }
@@ -407,6 +431,7 @@ func (s *Server) SetupRoutes(r *mux.Router) {
 	// ── Agent Tasks ──────────────────────────────────────────────────
 	authenticated.HandleFunc("/tasks", s.handleCreateTask).Methods("POST")
 	authenticated.HandleFunc("/tasks", s.handleListTasks).Methods("GET")
+	authenticated.HandleFunc("/tasks", s.handleDeleteAllTasks).Methods("DELETE")
 	authenticated.HandleFunc("/tasks/readiness", s.handleTaskReadiness).Methods("GET")
 	authenticated.HandleFunc("/tasks/stats", s.handleTaskStats).Methods("GET")
 	authenticated.HandleFunc("/tasks/settings", s.handleGetTaskSettings).Methods("GET")
@@ -603,6 +628,97 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// --- Linear Issue Poller (webhook fallback) ---
+
+func startLinearPoller(
+	linearService *services.LinearService,
+	taskService *services.TaskService,
+	taskExecutor *services.TaskExecutorService,
+	taskClassifier *services.TaskClassifier,
+	repoService *services.RepoService,
+	interval time.Duration,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx := context.Background()
+		conns, err := linearService.GetAllConnections(ctx)
+		if err != nil || len(conns) == 0 {
+			continue
+		}
+
+		for _, conn := range conns {
+			issues, err := linearService.FetchLabeledIssues(ctx, conn.OrgID)
+			if err != nil {
+				fmt.Printf("[poller] error fetching issues for org %s: %v\n", conn.OrgID, err)
+				continue
+			}
+
+			for _, issue := range issues {
+				issueID, _ := issue["id"].(string)
+				if issueID == "" {
+					continue
+				}
+
+				exists, _ := taskService.TaskExistsForLinearIssue(ctx, conn.OrgID, issueID)
+				if exists {
+					continue
+				}
+
+				title, _ := issue["title"].(string)
+				desc, _ := issue["description"].(string)
+				ident, _ := issue["identifier"].(string)
+				issueURL, _ := issue["url"].(string)
+
+				repoFullName := ""
+				repos, repoErr := repoService.ListRepos(ctx, conn.OrgID)
+				if repoErr == nil && len(repos) > 0 {
+					repoFullName = repos[0].RepoFullName
+				}
+
+				fmt.Printf("[poller] found new labeled issue: %s (%s) for org %s\n", title, ident, conn.OrgID)
+
+				task, err := taskService.CreateTask(ctx, conn.OrgID, services.CreateTaskRequest{
+					Title:            title,
+					Description:      desc,
+					LinearIssueID:    issueID,
+					LinearIdentifier: ident,
+					LinearURL:        issueURL,
+					RepoFullName:     repoFullName,
+				})
+				if err != nil {
+					fmt.Printf("[poller] failed to create task for %s: %v\n", ident, err)
+					continue
+				}
+
+				fmt.Printf("[poller] created task %s for issue %s, classifying...\n", task.ID, ident)
+
+				go func(orgID, taskID, issueIdent string) {
+					bgCtx := context.Background()
+
+					incomingTask := &services.IncomingTask{
+						ExternalID:  issueID,
+						Identifier:  ident,
+						ExternalURL: issueURL,
+						Title:       title,
+						Description: desc,
+					}
+					classification, classErr := taskClassifier.ClassifyTask(bgCtx, orgID, incomingTask, "")
+					if classErr != nil {
+						fmt.Printf("[poller] classification failed for %s, defaulting to short: %v\n", issueIdent, classErr)
+						classification = &services.TaskClassification{Complexity: "short"}
+					}
+					_ = classification
+
+					taskService.StartTaskExecution(bgCtx, orgID, taskID)
+					taskExecutor.ExecuteTask(bgCtx, orgID, taskID)
+				}(conn.OrgID, task.ID, ident)
+			}
+		}
+	}
 }
 
 // --- Linear Webhook ---
@@ -1125,13 +1241,18 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	orgID := GetOrgID(r.Context())
 	branch := r.URL.Query().Get("branch")
 
-	var snapshots []*models.Snapshot
-	var err error
 	if branch == "" {
-		snapshots, err = s.snapshotStore.ListByOrg(r.Context(), orgID)
-	} else {
-		snapshots, err = s.snapshotStore.ListByOrgAndBranch(r.Context(), orgID, branch)
+		writeError(w, http.StatusBadRequest, "branch query parameter is required")
+		return
 	}
+
+	if s.snapshotStore == nil {
+		writeJSON(w, http.StatusOK, []*models.Snapshot{})
+		return
+	}
+
+	var snapshots []*models.Snapshot
+	snapshots, err := s.snapshotStore.ListByOrgAndBranch(r.Context(), orgID, branch)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2482,6 +2603,21 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tasks)
 }
 
+func (s *Server) handleDeleteAllTasks(w http.ResponseWriter, r *http.Request) {
+	orgID := r.Header.Get("X-Org-ID")
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "missing org ID")
+		return
+	}
+
+	count, err := s.taskService.DeleteAllTasks(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"deleted": count})
+}
+
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	orgID := r.Header.Get("X-Org-ID")
 	taskID := mux.Vars(r)["id"]
@@ -2699,6 +2835,15 @@ func (s *Server) handleLinearCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Auto-create webhook in the Linear workspace so we receive issue events
+	if s.config.APIURL != "" {
+		webhookURL := s.config.APIURL + "/api/v1/webhooks/linear"
+		if err := s.linearService.CreateWebhook(r.Context(), orgID, webhookURL); err != nil {
+			fmt.Printf("[linear] warning: failed to auto-create webhook: %v\n", err)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"connected":      true,
 		"workspace_id":   conn.WorkspaceID,
@@ -2789,11 +2934,11 @@ func (s *Server) handleGetClaudeConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"configured":       true,
-		"api_key_masked":   cfg.APIKeyMasked,
-		"model":            cfg.Model,
-		"max_turns":        cfg.MaxTurns,
-		"allowed_tools":    cfg.AllowedTools,
+		"configured":        true,
+		"api_key_masked":    cfg.APIKeyMasked,
+		"model":             cfg.Model,
+		"max_turns":         cfg.MaxTurns,
+		"allowed_tools":     cfg.AllowedTools,
 		"max_cost_per_task": cfg.MaxCostPerTask,
 	})
 }
@@ -2863,17 +3008,37 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"linear": map[string]interface{}{
-			"connected":      linearConn != nil,
-			"workspace_name": func() string { if linearConn != nil { return linearConn.WorkspaceName }; return "" }(),
+			"connected": linearConn != nil,
+			"workspace_name": func() string {
+				if linearConn != nil {
+					return linearConn.WorkspaceName
+				}
+				return ""
+			}(),
 		},
 		"claude": map[string]interface{}{
-			"configured":   claudeCfg != nil,
-			"model":        func() string { if claudeCfg != nil { return claudeCfg.Model }; return "" }(),
+			"configured": claudeCfg != nil,
+			"model": func() string {
+				if claudeCfg != nil {
+					return claudeCfg.Model
+				}
+				return ""
+			}(),
 		},
 		"github": map[string]interface{}{
-			"connected":     ghConn != nil,
-			"github_user":   func() string { if ghConn != nil { return ghConn.GitHubUser }; return "" }(),
-			"github_avatar": func() string { if ghConn != nil { return ghConn.GitHubAvatar }; return "" }(),
+			"connected": ghConn != nil,
+			"github_user": func() string {
+				if ghConn != nil {
+					return ghConn.GitHubUser
+				}
+				return ""
+			}(),
+			"github_avatar": func() string {
+				if ghConn != nil {
+					return ghConn.GitHubAvatar
+				}
+				return ""
+			}(),
 		},
 		"billing": map[string]interface{}{
 			"active": hasBilling,

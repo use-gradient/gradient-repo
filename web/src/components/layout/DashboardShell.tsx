@@ -71,7 +71,7 @@ export function DashboardShell() {
                 </p>
               </div>
               <CreateOrganization
-                afterCreateOrganizationUrl="/dashboard/environments"
+                afterCreateOrganizationUrl="/dashboard/get-started"
                 appearance={{
                   elements: {
                     rootBox: { width: '100%', maxWidth: '420px' },

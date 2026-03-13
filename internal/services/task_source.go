@@ -61,8 +61,10 @@ func (s *LinearTaskSource) ParseEvent(payload []byte) (*IncomingTask, error) {
 	if data == nil {
 		return nil, fmt.Errorf("missing event data")
 	}
-	// Only create tasks for new issues, not updates/removes/state changes
-	if action != "create" {
+	// Handle both "create" (issue created with label) and "update" (label added later).
+	// Removes and other actions are ignored — deduplication in the webhook handler
+	// prevents double-processing if both create and update fire for the same issue.
+	if action != "create" && action != "update" {
 		return nil, nil
 	}
 

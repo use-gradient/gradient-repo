@@ -254,6 +254,20 @@ func (s *TaskService) ListTasks(ctx context.Context, orgID, status string, limit
 	return tasks, nil
 }
 
+func (s *TaskService) DeleteAllTasks(ctx context.Context, orgID string) (int64, error) {
+	// Delete logs first (foreign key-like dependency)
+	_, _ = s.db.Pool.Exec(ctx, `
+		DELETE FROM task_execution_log WHERE task_id IN (
+			SELECT id FROM agent_tasks WHERE org_id = $1
+		)`, orgID)
+
+	result, err := s.db.Pool.Exec(ctx, `DELETE FROM agent_tasks WHERE org_id = $1`, orgID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 func (s *TaskService) CancelTask(ctx context.Context, orgID, taskID string) error {
 	_, err := s.db.Pool.Exec(ctx, `
 		UPDATE agent_tasks SET status = 'cancelled', updated_at = NOW()

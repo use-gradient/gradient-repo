@@ -41,6 +41,8 @@ const (
 	EventErrorEncountered EventType = "error_encountered"
 	EventCommandRan       EventType = "command_ran"
 	EventFileChanged      EventType = "file_changed"
+	EventDecisionMade     EventType = "decision_made"
+	EventSubtaskMarked    EventType = "subtask_marked"
 	EventCustom           EventType = "custom"
 
 	// Agent orchestration events
@@ -66,6 +68,8 @@ var validEventTypes = map[EventType]bool{
 	EventErrorEncountered: true,
 	EventCommandRan:       true,
 	EventFileChanged:      true,
+	EventDecisionMade:     true,
+	EventSubtaskMarked:    true,
 	EventCustom:           true,
 
 	// Agent orchestration events
@@ -93,11 +97,11 @@ type Event struct {
 	Type          EventType `json:"type"`           // Event type (enum)
 
 	// Scoping
-	OrgID         string `json:"org_id"` // Organization ID
-	RepoFullName  string `json:"repo_full_name,omitempty"`
-	Branch        string `json:"branch"` // Git branch this event belongs to
-	EnvID  string `json:"env_id"` // Environment that produced this event
-	Source string `json:"source"` // Source identifier (e.g. "agent", "api", "cli")
+	OrgID        string `json:"org_id"` // Organization ID
+	RepoFullName string `json:"repo_full_name,omitempty"`
+	Branch       string `json:"branch"` // Git branch this event belongs to
+	EnvID        string `json:"env_id"` // Environment that produced this event
+	Source       string `json:"source"` // Source identifier (e.g. "agent", "api", "cli")
 
 	// Payload — type-specific structured data
 	Data json.RawMessage `json:"data"` // Type-specific payload (see *Data structs)
@@ -185,6 +189,28 @@ type FileChangeData struct {
 	Action       string `json:"action"` // "created", "modified", "deleted"
 	LinesAdded   int    `json:"lines_added,omitempty"`
 	LinesRemoved int    `json:"lines_removed,omitempty"`
+}
+
+// DecisionData is the payload for decision_made events.
+type DecisionData struct {
+	Message          string   `json:"message"`
+	TaskID           string   `json:"task_id,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	Subtask          string   `json:"subtask,omitempty"`
+	Outcome          string   `json:"outcome,omitempty"`
+	FailureSignature string   `json:"failure_signature,omitempty"`
+	RelatedFiles     []string `json:"related_files,omitempty"`
+}
+
+// SubtaskData is the payload for subtask_marked events.
+type SubtaskData struct {
+	Name             string   `json:"name"`
+	TaskID           string   `json:"task_id,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	Outcome          string   `json:"outcome,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	FailureSignature string   `json:"failure_signature,omitempty"`
+	RelatedFiles     []string `json:"related_files,omitempty"`
 }
 
 // CustomData is the payload for custom events.
@@ -369,6 +395,22 @@ func (e *Event) Validate() error {
 		if d.Key == "" {
 			return fmt.Errorf("config events require key")
 		}
+	case EventDecisionMade:
+		var d DecisionData
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return fmt.Errorf("invalid decision data: %w", err)
+		}
+		if d.Message == "" {
+			return fmt.Errorf("decision events require message")
+		}
+	case EventSubtaskMarked:
+		var d SubtaskData
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return fmt.Errorf("invalid subtask data: %w", err)
+		}
+		if d.Name == "" {
+			return fmt.Errorf("subtask events require name")
+		}
 	}
 
 	return nil
@@ -445,12 +487,12 @@ type EventFilter struct {
 	RepoFullName string      `json:"repo_full_name,omitempty"`
 	Branch       string      `json:"branch,omitempty"`
 	EnvID        string      `json:"env_id,omitempty"`
-	Types  []EventType `json:"types,omitempty"`
-	Since  time.Time   `json:"since,omitempty"`
-	Until  time.Time   `json:"until,omitempty"`
-	MinSeq int64       `json:"min_seq,omitempty"` // For cursor-based pagination
-	Limit  int         `json:"limit,omitempty"`
-	Source string      `json:"source,omitempty"`
+	Types        []EventType `json:"types,omitempty"`
+	Since        time.Time   `json:"since,omitempty"`
+	Until        time.Time   `json:"until,omitempty"`
+	MinSeq       int64       `json:"min_seq,omitempty"` // For cursor-based pagination
+	Limit        int         `json:"limit,omitempty"`
+	Source       string      `json:"source,omitempty"`
 }
 
 // EventBatch is a group of events returned from a query, with cursor info.

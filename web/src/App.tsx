@@ -68,7 +68,7 @@ export default function App() {
             </ProtectedRoute>
           }
         >
-          <Route index element={<Navigate to="environments" replace />} />
+          <Route index element={<Navigate to="get-started" replace />} />
           <Route path="environments" element={<Environments />} />
           <Route path="context" element={<ContextTab />} />
           <Route path="billing" element={<BillingTab />} />

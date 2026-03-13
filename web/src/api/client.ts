@@ -141,6 +141,7 @@ export const api = {
   // ── Agent Tasks ──
   tasks: {
     readiness:(token: string, orgId: string) => request<{ ready: boolean; claude_configured: boolean; linear_connected: boolean; message?: string }>('GET', '/tasks/readiness', undefined, token, orgId),
+    deleteAll:(token: string, orgId: string) => request<{ deleted: number }>('DELETE', '/tasks', undefined, token, orgId),
     list:     (token: string, orgId: string, params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : ''
       return request<any[]>('GET', `/tasks${qs}`, undefined, token, orgId)

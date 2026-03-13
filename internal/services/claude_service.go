@@ -1,9 +1,12 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -141,4 +144,68 @@ func (s *ClaudeService) DeleteConfig(ctx context.Context, orgID string) error {
 func (s *ClaudeService) HasConfig(ctx context.Context, orgID string) bool {
 	cfg, err := s.GetConfig(ctx, orgID, "")
 	return err == nil && cfg != nil
+}
+
+func (s *ClaudeService) Complete(ctx context.Context, orgID, prompt string, maxTokens int) (string, string, error) {
+	cfg, err := s.GetConfig(ctx, orgID, "")
+	if err != nil {
+		return "", "", err
+	}
+	if cfg == nil {
+		return "", "", fmt.Errorf("Claude not configured")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+
+	text, err := s.callClaude(ctx, cfg.AnthropicAPIKey, cfg.Model, prompt, maxTokens)
+	if err != nil {
+		return "", cfg.Model, err
+	}
+	return text, cfg.Model, nil
+}
+
+func (s *ClaudeService) callClaude(ctx context.Context, apiKey, model, prompt string, maxTokens int) (string, error) {
+	reqBody := map[string]interface{}{
+		"model":      model,
+		"max_tokens": maxTokens,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+	}
+	bodyJSON, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(bodyJSON))
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("content-type", "application/json")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Anthropic API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("Anthropic API %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse Claude response: %w", err)
+	}
+
+	for _, c := range result.Content {
+		if c.Type == "text" {
+			return c.Text, nil
+		}
+	}
+	return "", fmt.Errorf("no text content in Claude response")
 }

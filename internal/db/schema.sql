@@ -522,6 +522,177 @@ CREATE INDEX IF NOT EXISTS idx_context_objects_branch ON context_objects(org_id,
 CREATE INDEX IF NOT EXISTS idx_context_objects_type ON context_objects(org_id, branch, type);
 CREATE INDEX IF NOT EXISTS idx_context_objects_source ON context_objects(source_session);
 
+-- Memory tips: durable, attributable guidance distilled from trajectories
+CREATE TABLE IF NOT EXISTS memory_tips (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id TEXT NOT NULL,
+    repo_full_name TEXT NOT NULL,
+    source_branch TEXT NOT NULL DEFAULT '',
+    tip_type TEXT NOT NULL,              -- strategy, recovery, optimization
+    scope TEXT NOT NULL DEFAULT 'task',  -- task, subtask
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    trigger_condition TEXT DEFAULT '',
+    action_steps JSONB NOT NULL DEFAULT '[]',
+    priority TEXT NOT NULL DEFAULT 'medium',
+    confidence NUMERIC(5,4) NOT NULL DEFAULT 0.5000,
+    canonical_key TEXT NOT NULL,
+    failure_signature TEXT DEFAULT '',
+    task_fingerprint TEXT DEFAULT '',
+    keywords JSONB NOT NULL DEFAULT '[]',
+    search_text TEXT NOT NULL DEFAULT '',
+    semantic_summary TEXT NOT NULL DEFAULT '',
+    outcome_class TEXT NOT NULL DEFAULT '',
+    embedding_status TEXT NOT NULL DEFAULT 'disabled',
+    embedding_model TEXT DEFAULT '',
+    embedding_updated_at TIMESTAMPTZ,
+    evidence_count INTEGER NOT NULL DEFAULT 1,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_retrieved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(org_id, repo_full_name, canonical_key, tip_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_tips_repo ON memory_tips(org_id, repo_full_name, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_tips_type ON memory_tips(org_id, repo_full_name, tip_type);
+CREATE INDEX IF NOT EXISTS idx_memory_tips_branch ON memory_tips(org_id, repo_full_name, source_branch);
+CREATE INDEX IF NOT EXISTS idx_memory_tips_failure_signature ON memory_tips(org_id, repo_full_name, failure_signature);
+
+DO $$ BEGIN
+    ALTER TABLE memory_tips ADD COLUMN IF NOT EXISTS semantic_summary TEXT NOT NULL DEFAULT '';
+    ALTER TABLE memory_tips ADD COLUMN IF NOT EXISTS embedding_status TEXT NOT NULL DEFAULT 'disabled';
+    ALTER TABLE memory_tips ADD COLUMN IF NOT EXISTS embedding_model TEXT DEFAULT '';
+    ALTER TABLE memory_tips ADD COLUMN IF NOT EXISTS embedding_updated_at TIMESTAMPTZ;
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- Provenance records for how a memory tip was generated
+CREATE TABLE IF NOT EXISTS memory_tip_sources (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tip_id UUID NOT NULL REFERENCES memory_tips(id) ON DELETE CASCADE,
+    task_id VARCHAR(255) REFERENCES agent_tasks(id),
+    session_id UUID REFERENCES agent_sessions(id),
+    bundle_id UUID REFERENCES change_bundles(id),
+    event_id VARCHAR(255),
+    source_kind TEXT NOT NULL DEFAULT 'trajectory',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_tip_sources_tip ON memory_tip_sources(tip_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_tip_sources_task ON memory_tip_sources(task_id, created_at DESC);
+
+-- Retrieval audit for prompt injection/debugging
+CREATE TABLE IF NOT EXISTS memory_tip_retrievals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tip_id UUID NOT NULL REFERENCES memory_tips(id) ON DELETE CASCADE,
+    task_id VARCHAR(255) REFERENCES agent_tasks(id),
+    session_id UUID REFERENCES agent_sessions(id),
+    score NUMERIC(10,4) NOT NULL DEFAULT 0,
+    reason TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_tip_retrievals_tip ON memory_tip_retrievals(tip_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_tip_retrievals_task ON memory_tip_retrievals(task_id, created_at DESC);
+
+-- Trajectory analyses: normalized, attributable execution summaries
+CREATE TABLE IF NOT EXISTS trajectory_analyses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id TEXT NOT NULL,
+    repo_full_name TEXT NOT NULL,
+    task_id VARCHAR(255) NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+    session_id UUID REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    source_branch TEXT NOT NULL DEFAULT '',
+    trajectory_summary TEXT NOT NULL DEFAULT '',
+    outcome_class TEXT NOT NULL DEFAULT '',
+    immediate_cause TEXT NOT NULL DEFAULT '',
+    proximate_cause TEXT NOT NULL DEFAULT '',
+    root_cause TEXT NOT NULL DEFAULT '',
+    recovery_action TEXT NOT NULL DEFAULT '',
+    recovery_reason TEXT NOT NULL DEFAULT '',
+    inefficiency_pattern TEXT NOT NULL DEFAULT '',
+    recommended_alternative TEXT NOT NULL DEFAULT '',
+    subtask_analyses JSONB NOT NULL DEFAULT '[]',
+    analyzer_version TEXT NOT NULL DEFAULT 'v1',
+    model_name TEXT NOT NULL DEFAULT '',
+    confidence NUMERIC(5,4) NOT NULL DEFAULT 0.5000,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(task_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trajectory_analyses_repo ON trajectory_analyses(org_id, repo_full_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trajectory_analyses_task ON trajectory_analyses(task_id, created_at DESC);
+
+-- Retrieval runs: audit full candidate / rerank / selection flow
+CREATE TABLE IF NOT EXISTS retrieval_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id TEXT NOT NULL,
+    repo_full_name TEXT NOT NULL,
+    task_id VARCHAR(255) REFERENCES agent_tasks(id) ON DELETE SET NULL,
+    session_id UUID REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    query_text TEXT NOT NULL DEFAULT '',
+    subtask TEXT NOT NULL DEFAULT '',
+    failure_signature TEXT NOT NULL DEFAULT '',
+    candidate_tip_ids JSONB NOT NULL DEFAULT '[]',
+    reranked_tip_ids JSONB NOT NULL DEFAULT '[]',
+    selected_tip_ids JSONB NOT NULL DEFAULT '[]',
+    vector_search_used BOOLEAN NOT NULL DEFAULT FALSE,
+    reranker_model TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'completed',
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_runs_repo ON retrieval_runs(org_id, repo_full_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_retrieval_runs_task ON retrieval_runs(task_id, created_at DESC);
+
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN undefined_file THEN
+    NULL;
+WHEN feature_not_supported THEN
+    NULL;
+WHEN insufficient_privilege THEN
+    NULL;
+WHEN others THEN
+    NULL;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        EXECUTE '
+            CREATE TABLE IF NOT EXISTS memory_tip_embeddings (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tip_id UUID NOT NULL REFERENCES memory_tips(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL DEFAULT '''',
+                model TEXT NOT NULL DEFAULT '''',
+                dimensions INTEGER NOT NULL DEFAULT 0,
+                embedding_vector vector(1536),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(tip_id, provider, model)
+            )';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_memory_tip_embeddings_tip ON memory_tip_embeddings(tip_id, updated_at DESC)';
+    ELSE
+        EXECUTE '
+            CREATE TABLE IF NOT EXISTS memory_tip_embeddings (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tip_id UUID NOT NULL REFERENCES memory_tips(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL DEFAULT '''',
+                model TEXT NOT NULL DEFAULT '''',
+                dimensions INTEGER NOT NULL DEFAULT 0,
+                embedding_vector_json JSONB NOT NULL DEFAULT ''[]'',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(tip_id, provider, model)
+            )';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_memory_tip_embeddings_tip ON memory_tip_embeddings(tip_id, updated_at DESC)';
+    END IF;
+END $$;
+
 -- ═══════════════════════════════════════════════════════════════
 -- Repo-scoped context mesh: add repo_full_name to environments,
 -- contexts, context_events, context_objects for per-repo isolation

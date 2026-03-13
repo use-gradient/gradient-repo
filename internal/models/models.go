@@ -12,9 +12,9 @@ type Environment struct {
 	Name          string                 `json:"name"`
 	OrgID         string                 `json:"org_id"`
 	RepoFullName  string                 `json:"repo_full_name,omitempty"`
-	Provider      string                 `json:"provider"`       // cloud provider name ("hetzner", "aws", "gcp", etc.)
-	Region        string                 `json:"region"`         // provider-specific region/location
-	Size          string                 `json:"size"`           // abstract size ("small", "medium", "large", "gpu")
+	Provider      string                 `json:"provider"`               // cloud provider name ("hetzner", "aws", "gcp", etc.)
+	Region        string                 `json:"region"`                 // provider-specific region/location
+	Size          string                 `json:"size"`                   // abstract size ("small", "medium", "large", "gpu")
 	ClusterName   string                 `json:"cluster_name,omitempty"` // provider-specific reference (server ID, instance ID, etc.)
 	IPAddress     string                 `json:"ip_address,omitempty"`   // public IP (for SSH-based providers like Hetzner)
 	Status        string                 `json:"status"`
@@ -242,13 +242,13 @@ type OrgSettings struct {
 type BillingStatus struct {
 	OrgID            string   `json:"org_id"`
 	Tier             string   `json:"tier"`               // "free" or "paid"
-	HasPaymentMethod bool     `json:"has_payment_method"`  // Stripe customer + subscription exists
-	StripeConfigured bool     `json:"stripe_configured"`   // whether Stripe is configured on the server
-	FreeHoursUsed    float64  `json:"free_hours_used"`     // hours used this month (free tier)
-	FreeHoursLimit   float64  `json:"free_hours_limit"`    // 20.0
-	FreeHoursLeft    float64  `json:"free_hours_left"`     // remaining free hours
-	CanCreateEnv     bool     `json:"can_create_env"`      // whether the org can create a new environment
-	AllowedSizes     []string `json:"allowed_sizes"`       // sizes the org can use
+	HasPaymentMethod bool     `json:"has_payment_method"` // Stripe customer + subscription exists
+	StripeConfigured bool     `json:"stripe_configured"`  // whether Stripe is configured on the server
+	FreeHoursUsed    float64  `json:"free_hours_used"`    // hours used this month (free tier)
+	FreeHoursLimit   float64  `json:"free_hours_limit"`   // 20.0
+	FreeHoursLeft    float64  `json:"free_hours_left"`    // remaining free hours
+	CanCreateEnv     bool     `json:"can_create_env"`     // whether the org can create a new environment
+	AllowedSizes     []string `json:"allowed_sizes"`      // sizes the org can use
 	Month            string   `json:"month"`
 }
 
@@ -348,24 +348,24 @@ type GitHubConnection struct {
 
 // RepoConnection links a GitHub repo to a Gradient org for auto-fork
 type RepoConnection struct {
-	ID                    string    `json:"id"`
-	OrgID                 string    `json:"org_id"`
-	InstallationID        int64     `json:"installation_id"`
-	RepoFullName          string    `json:"repo_full_name"`
-	DefaultBranch         string    `json:"default_branch"`
-	AutoForkEnabled       bool      `json:"auto_fork_enabled"`
-	AutoSnapshotOnPush    bool      `json:"auto_snapshot_on_push"`
-	WebhookID             int64     `json:"webhook_id,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	OrgID              string    `json:"org_id"`
+	InstallationID     int64     `json:"installation_id"`
+	RepoFullName       string    `json:"repo_full_name"`
+	DefaultBranch      string    `json:"default_branch"`
+	AutoForkEnabled    bool      `json:"auto_fork_enabled"`
+	AutoSnapshotOnPush bool      `json:"auto_snapshot_on_push"`
+	WebhookID          int64     `json:"webhook_id,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 // GitHubInstallation stores raw GitHub App installation data from webhooks
 type GitHubInstallation struct {
-	InstallationID    int64     `json:"installation_id"`
-	AccountLogin      string    `json:"account_login"`
-	Repos             []string  `json:"repos"` // list of "owner/repo" strings
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	InstallationID int64     `json:"installation_id"`
+	AccountLogin   string    `json:"account_login"`
+	Repos          []string  `json:"repos"` // list of "owner/repo" strings
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -374,36 +374,36 @@ type GitHubInstallation struct {
 
 // LinearConnection represents a Linear workspace connection for an org
 type LinearConnection struct {
-	ID              string    `json:"id"`
-	OrgID           string    `json:"org_id"`
-	AccessToken     string    `json:"-"` // never serialize
-	RefreshToken    string    `json:"-"`
-	TokenExpiresAt  *time.Time `json:"token_expires_at,omitempty"`
-	WorkspaceID     string    `json:"workspace_id,omitempty"`
-	WorkspaceName   string    `json:"workspace_name,omitempty"`
-	WebhookID       string    `json:"webhook_id,omitempty"`
-	WebhookSecret   string    `json:"-"`
-	FilterTeamIDs   []string  `json:"filter_team_ids"`
-	FilterProjectIDs []string `json:"filter_project_ids"`
-	FilterLabelNames []string `json:"filter_label_names"`
-	TriggerState    string    `json:"trigger_state"`
-	Status          string    `json:"status"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID               string     `json:"id"`
+	OrgID            string     `json:"org_id"`
+	AccessToken      string     `json:"-"` // never serialize
+	RefreshToken     string     `json:"-"`
+	TokenExpiresAt   *time.Time `json:"token_expires_at,omitempty"`
+	WorkspaceID      string     `json:"workspace_id,omitempty"`
+	WorkspaceName    string     `json:"workspace_name,omitempty"`
+	WebhookID        string     `json:"webhook_id,omitempty"`
+	WebhookSecret    string     `json:"-"`
+	FilterTeamIDs    []string   `json:"filter_team_ids"`
+	FilterProjectIDs []string   `json:"filter_project_ids"`
+	FilterLabelNames []string   `json:"filter_label_names"`
+	TriggerState     string     `json:"trigger_state"`
+	Status           string     `json:"status"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // ClaudeConfig represents Claude Code configuration for an org (or per-user override)
 type ClaudeConfig struct {
-	ID               string  `json:"id"`
-	OrgID            string  `json:"org_id"`
-	UserID           string  `json:"user_id,omitempty"`
-	AnthropicAPIKey  string  `json:"-"` // never serialize
-	APIKeyMasked     string  `json:"api_key_masked,omitempty"` // computed: "sk-ant-...•••"
-	Model            string  `json:"model"`
-	MaxTurns         int     `json:"max_turns"`
-	AllowedTools     []string `json:"allowed_tools"`
-	MaxCostPerTask   float64 `json:"max_cost_per_task,omitempty"`
-	MaxTokensPerTask int     `json:"max_tokens_per_task"`
+	ID               string    `json:"id"`
+	OrgID            string    `json:"org_id"`
+	UserID           string    `json:"user_id,omitempty"`
+	AnthropicAPIKey  string    `json:"-"`                        // never serialize
+	APIKeyMasked     string    `json:"api_key_masked,omitempty"` // computed: "sk-ant-...•••"
+	Model            string    `json:"model"`
+	MaxTurns         int       `json:"max_turns"`
+	AllowedTools     []string  `json:"allowed_tools"`
+	MaxCostPerTask   float64   `json:"max_cost_per_task,omitempty"`
+	MaxTokensPerTask int       `json:"max_tokens_per_task"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
@@ -418,35 +418,35 @@ func MaskAPIKey(key string) string {
 
 // AgentTask represents a task being worked on by Claude Code
 type AgentTask struct {
-	ID               string     `json:"id"`
-	OrgID            string     `json:"org_id"`
-	ParentTaskID     string     `json:"parent_task_id,omitempty"`
-	LinearIssueID    string     `json:"linear_issue_id,omitempty"`
-	LinearIdentifier string     `json:"linear_identifier,omitempty"`
-	LinearURL        string     `json:"linear_url,omitempty"`
-	Title            string     `json:"title"`
-	Description      string     `json:"description,omitempty"`
-	Prompt           string     `json:"prompt,omitempty"`
-	EnvironmentID    string     `json:"environment_id,omitempty"`
-	Branch           string     `json:"branch,omitempty"`
-	RepoFullName     string     `json:"repo_full_name,omitempty"`
-	Status           string     `json:"status"` // pending, queued, running, complete, failed, cancelled
-	OutputSummary    string     `json:"output_summary,omitempty"`
+	ID               string                 `json:"id"`
+	OrgID            string                 `json:"org_id"`
+	ParentTaskID     string                 `json:"parent_task_id,omitempty"`
+	LinearIssueID    string                 `json:"linear_issue_id,omitempty"`
+	LinearIdentifier string                 `json:"linear_identifier,omitempty"`
+	LinearURL        string                 `json:"linear_url,omitempty"`
+	Title            string                 `json:"title"`
+	Description      string                 `json:"description,omitempty"`
+	Prompt           string                 `json:"prompt,omitempty"`
+	EnvironmentID    string                 `json:"environment_id,omitempty"`
+	Branch           string                 `json:"branch,omitempty"`
+	RepoFullName     string                 `json:"repo_full_name,omitempty"`
+	Status           string                 `json:"status"` // pending, queued, running, complete, failed, cancelled
+	OutputSummary    string                 `json:"output_summary,omitempty"`
 	OutputJSON       map[string]interface{} `json:"output_json,omitempty"`
-	CommitSHA        string     `json:"commit_sha,omitempty"`
-	PRURL            string     `json:"pr_url,omitempty"`
-	ErrorMessage     string     `json:"error_message,omitempty"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	DurationSeconds  int        `json:"duration_seconds,omitempty"`
-	TokensUsed       int        `json:"tokens_used,omitempty"`
-	EstimatedCost    float64    `json:"estimated_cost,omitempty"`
-	RetryCount       int        `json:"retry_count"`
-	MaxRetries       int        `json:"max_retries"`
-	ContextSaved     bool       `json:"context_saved"`
-	SnapshotTaken    bool       `json:"snapshot_taken"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	CommitSHA        string                 `json:"commit_sha,omitempty"`
+	PRURL            string                 `json:"pr_url,omitempty"`
+	ErrorMessage     string                 `json:"error_message,omitempty"`
+	StartedAt        *time.Time             `json:"started_at,omitempty"`
+	CompletedAt      *time.Time             `json:"completed_at,omitempty"`
+	DurationSeconds  int                    `json:"duration_seconds,omitempty"`
+	TokensUsed       int                    `json:"tokens_used,omitempty"`
+	EstimatedCost    float64                `json:"estimated_cost,omitempty"`
+	RetryCount       int                    `json:"retry_count"`
+	MaxRetries       int                    `json:"max_retries"`
+	ContextSaved     bool                   `json:"context_saved"`
+	SnapshotTaken    bool                   `json:"snapshot_taken"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
 }
 
 // TaskLogEntry is a step in the task execution log
@@ -463,7 +463,7 @@ type TaskLogEntry struct {
 // TaskSettings holds per-org task execution preferences
 type TaskSettings struct {
 	OrgID              string `json:"org_id"`
-	InstanceStrategy   string `json:"instance_strategy"`   // one_per_task, shared_branch, single_instance, auto
+	InstanceStrategy   string `json:"instance_strategy"` // one_per_task, shared_branch, single_instance, auto
 	MaxConcurrentTasks int    `json:"max_concurrent_tasks"`
 	DefaultEnvSize     string `json:"default_env_size"`
 	DefaultEnvProvider string `json:"default_env_provider"`
@@ -480,19 +480,19 @@ type TaskSettings struct {
 
 // AgentSession is a bounded block of work assigned to one agent.
 type AgentSession struct {
-	ID              string         `json:"id"`
-	TaskID          string         `json:"task_id"`
-	ParentSessionID *string        `json:"parent_session_id,omitempty"`
-	OrgID           string         `json:"org_id"`
-	AgentRole       string         `json:"agent_role"`
-	Scope           SessionScope   `json:"scope"`
-	InitialSHA      string         `json:"initial_sha,omitempty"`
-	BranchName      string         `json:"branch_name,omitempty"`
-	EnvironmentID   string         `json:"environment_id,omitempty"`
-	Status          string         `json:"status"`
-	Contracts       []ContractRef  `json:"contracts,omitempty"`
-	CreatedAt       time.Time      `json:"created_at"`
-	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
+	ID              string        `json:"id"`
+	TaskID          string        `json:"task_id"`
+	ParentSessionID *string       `json:"parent_session_id,omitempty"`
+	OrgID           string        `json:"org_id"`
+	AgentRole       string        `json:"agent_role"`
+	Scope           SessionScope  `json:"scope"`
+	InitialSHA      string        `json:"initial_sha,omitempty"`
+	BranchName      string        `json:"branch_name,omitempty"`
+	EnvironmentID   string        `json:"environment_id,omitempty"`
+	Status          string        `json:"status"`
+	Contracts       []ContractRef `json:"contracts,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
+	CompletedAt     *time.Time    `json:"completed_at,omitempty"`
 }
 
 // SessionScope defines what files/modules/APIs an agent session owns.
@@ -534,10 +534,10 @@ type TestResult struct {
 
 // PolicyResult records a policy check (static analysis, LLM review, etc.)
 type PolicyResult struct {
-	Name       string  `json:"name"`
-	Status     string  `json:"status"` // "passed", "failed", "warning"
-	Score      float64 `json:"score,omitempty"`
-	Details    string  `json:"details,omitempty"`
+	Name    string  `json:"name"`
+	Status  string  `json:"status"` // "passed", "failed", "warning"
+	Score   float64 `json:"score,omitempty"`
+	Details string  `json:"details,omitempty"`
 }
 
 // Contract is an inter-agent agreement on API shapes, invariants, or schemas.
@@ -569,4 +569,133 @@ type ContextObject struct {
 	Version       int             `json:"version"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+// MemoryTip is durable guidance distilled from prior trajectories.
+type MemoryTip struct {
+	ID                 string     `json:"id"`
+	OrgID              string     `json:"org_id"`
+	RepoFullName       string     `json:"repo_full_name"`
+	SourceBranch       string     `json:"source_branch,omitempty"`
+	TipType            string     `json:"tip_type"` // strategy, recovery, optimization
+	Scope              string     `json:"scope"`    // task, subtask
+	Title              string     `json:"title"`
+	Content            string     `json:"content"`
+	TriggerCondition   string     `json:"trigger_condition,omitempty"`
+	ActionSteps        []string   `json:"action_steps,omitempty"`
+	Priority           string     `json:"priority"`
+	Confidence         float64    `json:"confidence"`
+	CanonicalKey       string     `json:"canonical_key"`
+	FailureSignature   string     `json:"failure_signature,omitempty"`
+	TaskFingerprint    string     `json:"task_fingerprint,omitempty"`
+	Keywords           []string   `json:"keywords,omitempty"`
+	SearchText         string     `json:"search_text,omitempty"`
+	SemanticSummary    string     `json:"semantic_summary,omitempty"`
+	OutcomeClass       string     `json:"outcome_class,omitempty"`
+	EmbeddingStatus    string     `json:"embedding_status,omitempty"`
+	EmbeddingModel     string     `json:"embedding_model,omitempty"`
+	EmbeddingUpdatedAt *time.Time `json:"embedding_updated_at,omitempty"`
+	EvidenceCount      int        `json:"evidence_count"`
+	UseCount           int        `json:"use_count"`
+	LastRetrievedAt    *time.Time `json:"last_retrieved_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// MemoryTipSource links a memory tip to the trajectory evidence that produced it.
+type MemoryTipSource struct {
+	ID         string    `json:"id"`
+	TipID      string    `json:"tip_id"`
+	TaskID     string    `json:"task_id,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	BundleID   string    `json:"bundle_id,omitempty"`
+	EventID    string    `json:"event_id,omitempty"`
+	SourceKind string    `json:"source_kind"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// MemoryTipRetrieval records when guidance was injected for a task.
+type MemoryTipRetrieval struct {
+	ID        string    `json:"id"`
+	TipID     string    `json:"tip_id"`
+	TaskID    string    `json:"task_id,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
+	Score     float64   `json:"score"`
+	Reason    string    `json:"reason,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// MemoryTipEmbedding stores vector-ready payloads for semantic retrieval.
+type MemoryTipEmbedding struct {
+	ID                  string    `json:"id"`
+	TipID               string    `json:"tip_id"`
+	Provider            string    `json:"provider"`
+	Model               string    `json:"model"`
+	Dimensions          int       `json:"dimensions"`
+	EmbeddingVector     []float32 `json:"embedding_vector,omitempty"`
+	EmbeddingVectorJSON []float32 `json:"embedding_vector_json,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// TrajectorySubtaskAnalysis captures attributed behavior for a single subtask.
+type TrajectorySubtaskAnalysis struct {
+	Name                   string   `json:"name"`
+	OutcomeClass           string   `json:"outcome_class"`
+	Summary                string   `json:"summary,omitempty"`
+	ImmediateCause         string   `json:"immediate_cause,omitempty"`
+	ProximateCause         string   `json:"proximate_cause,omitempty"`
+	RootCause              string   `json:"root_cause,omitempty"`
+	RecoveryAction         string   `json:"recovery_action,omitempty"`
+	RecoveryReason         string   `json:"recovery_reason,omitempty"`
+	InefficiencyPattern    string   `json:"inefficiency_pattern,omitempty"`
+	RecommendedAlternative string   `json:"recommended_alternative,omitempty"`
+	FailureSignature       string   `json:"failure_signature,omitempty"`
+	RelatedFiles           []string `json:"related_files,omitempty"`
+	Actions                []string `json:"actions,omitempty"`
+}
+
+// TrajectoryAnalysis stores normalized attribution for a task execution.
+type TrajectoryAnalysis struct {
+	ID                     string                      `json:"id"`
+	OrgID                  string                      `json:"org_id"`
+	RepoFullName           string                      `json:"repo_full_name"`
+	TaskID                 string                      `json:"task_id"`
+	SessionID              string                      `json:"session_id,omitempty"`
+	SourceBranch           string                      `json:"source_branch,omitempty"`
+	TrajectorySummary      string                      `json:"trajectory_summary"`
+	OutcomeClass           string                      `json:"outcome_class"`
+	ImmediateCause         string                      `json:"immediate_cause,omitempty"`
+	ProximateCause         string                      `json:"proximate_cause,omitempty"`
+	RootCause              string                      `json:"root_cause,omitempty"`
+	RecoveryAction         string                      `json:"recovery_action,omitempty"`
+	RecoveryReason         string                      `json:"recovery_reason,omitempty"`
+	InefficiencyPattern    string                      `json:"inefficiency_pattern,omitempty"`
+	RecommendedAlternative string                      `json:"recommended_alternative,omitempty"`
+	SubtaskAnalyses        []TrajectorySubtaskAnalysis `json:"subtask_analyses,omitempty"`
+	AnalyzerVersion        string                      `json:"analyzer_version"`
+	ModelName              string                      `json:"model_name,omitempty"`
+	Confidence             float64                     `json:"confidence"`
+	CreatedAt              time.Time                   `json:"created_at"`
+	UpdatedAt              time.Time                   `json:"updated_at"`
+}
+
+// RetrievalRun records the full selection pass used to inject memory.
+type RetrievalRun struct {
+	ID               string    `json:"id"`
+	OrgID            string    `json:"org_id"`
+	RepoFullName     string    `json:"repo_full_name"`
+	TaskID           string    `json:"task_id,omitempty"`
+	SessionID        string    `json:"session_id,omitempty"`
+	QueryText        string    `json:"query_text,omitempty"`
+	Subtask          string    `json:"subtask,omitempty"`
+	FailureSignature string    `json:"failure_signature,omitempty"`
+	CandidateTipIDs  []string  `json:"candidate_tip_ids,omitempty"`
+	RerankedTipIDs   []string  `json:"reranked_tip_ids,omitempty"`
+	SelectedTipIDs   []string  `json:"selected_tip_ids,omitempty"`
+	VectorSearchUsed bool      `json:"vector_search_used"`
+	RerankerModel    string    `json:"reranker_model,omitempty"`
+	Status           string    `json:"status"`
+	LatencyMs        int       `json:"latency_ms"`
+	CreatedAt        time.Time `json:"created_at"`
 }

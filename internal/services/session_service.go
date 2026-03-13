@@ -130,6 +130,17 @@ func (s *SessionService) CompleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *SessionService) CloseSession(ctx context.Context, id, status string) error {
+	now := time.Now()
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE agent_sessions SET status = $2, completed_at = $3
+		WHERE id = $1`, id, status, now)
+	if err != nil {
+		return fmt.Errorf("failed to close session: %w", err)
+	}
+	return nil
+}
+
 // ─── Change Bundles ─────────────────────────────────────────────────────
 
 func (s *SessionService) CreateBundle(ctx context.Context, bundle *models.ChangeBundle) (*models.ChangeBundle, error) {
