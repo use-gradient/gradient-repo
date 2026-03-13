@@ -411,6 +411,7 @@ type ClaudeConfig struct {
 	Model            string    `json:"model"`
 	MaxTurns         int       `json:"max_turns"`
 	AllowedTools     []string  `json:"allowed_tools"`
+	EnableTeams      bool      `json:"enable_teams"`
 	MaxCostPerTask   float64   `json:"max_cost_per_task,omitempty"`
 	MaxTokensPerTask int       `json:"max_tokens_per_task"`
 	CreatedAt        time.Time `json:"created_at"`

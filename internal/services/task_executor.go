@@ -440,7 +440,7 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		}
 	}
 
-	taskPrompt := e.buildTaskPrompt(task, settings, guidanceSection, envStateSection)
+	taskPrompt := e.buildTaskPrompt(task, settings, claudeCfg.EnableTeams, guidanceSection, envStateSection)
 
 	e.taskService.addLog(ctx, taskID, "task_prompt_built", "completed", truncate(taskPrompt, 4000), map[string]interface{}{
 		"prompt_length":   len(taskPrompt),
@@ -758,9 +758,13 @@ echo "MCP_SETUP_OK"`
 		mcpFlagStr = "--mcp-config /gradient/mcp-config.json "
 	}
 	effectiveAllowedTools := allowedToolsForExecution(claudeCfg, mcpReady)
+	teamsFlag := ""
+	if claudeCfg.EnableTeams {
+		teamsFlag = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 "
+	}
 	redactedCmd := fmt.Sprintf(
-		`export ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose`,
-		workDir, claudeCfg.Model, turnsPerIter, strings.Join(effectiveAllowedTools, ","), mcpFlagStr)
+		`%sexport ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose`,
+		teamsFlag, workDir, claudeCfg.Model, turnsPerIter, strings.Join(effectiveAllowedTools, ","), mcpFlagStr)
 	e.taskService.addLog(ctx, taskID, "claude_invocation", "started", redactedCmd, map[string]interface{}{
 		"model":               claudeCfg.Model,
 		"max_turns_total":     claudeCfg.MaxTurns,
@@ -768,6 +772,7 @@ echo "MCP_SETUP_OK"`
 		"max_iterations":      1,
 		"allowed_tools":       effectiveAllowedTools,
 		"mcp_enabled":         mcpReady,
+		"agent_teams_enabled": claudeCfg.EnableTeams,
 		"work_dir":            workDir,
 		"repo_cloned":         repoCloned,
 	})
@@ -1041,7 +1046,7 @@ func (e *TaskExecutorService) waitForEnvReady(ctx context.Context, envID string,
 	}
 }
 
-func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *models.TaskSettings, guidanceSection, envStateSection string) string {
+func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *models.TaskSettings, enableTeams bool, guidanceSection, envStateSection string) string {
 	var sb strings.Builder
 	sb.WriteString("# Task\n\n")
 	sb.WriteString(task.Title)
@@ -1063,6 +1068,16 @@ func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *
 	sb.WriteString("- Add tests for new functionality where appropriate\n")
 	sb.WriteString("- Commit changes with a clear commit message\n")
 	sb.WriteString("- Do NOT push to remote (the orchestrator handles this)\n")
+
+	if enableTeams {
+		sb.WriteString("\n## Agent Teams\n\n")
+		sb.WriteString("Agent Teams are enabled. For complex tasks that involve multiple distinct areas of work ")
+		sb.WriteString("(e.g., frontend + backend, multiple independent modules, docs + code + tests), ")
+		sb.WriteString("you can and should spawn teammate agents to work in parallel.\n")
+		sb.WriteString("- Decompose the task into independent subtasks and delegate them to teammates.\n")
+		sb.WriteString("- Each teammate works in the same repo but on different areas — coordinate via file ownership.\n")
+		sb.WriteString("- Use teams proactively for cross-cutting changes, multi-file refactors, or any task that benefits from parallelism.\n")
+	}
 
 	if guidanceSection != "" {
 		sb.WriteString("\n")
@@ -1137,13 +1152,20 @@ func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRep
 		maxTurns = 1
 	}
 
-	return fmt.Sprintf(`export ANTHROPIC_API_KEY="%s" && cd %s
+	teamsExport := ""
+	if cfg.EnableTeams {
+		teamsExport = `export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+`
+	}
+
+	return fmt.Sprintf(`export ANTHROPIC_API_KEY="%s"
+%scd %s
 
 claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1
 STATUS=$?
 echo "[gradient] Claude execution complete after 1 iteration(s)"
 exit $STATUS`,
-		cfg.AnthropicAPIKey, workDir,
+		cfg.AnthropicAPIKey, teamsExport, workDir,
 		cfg.Model, maxTurns, tools, mcpFlag,
 	)
 }

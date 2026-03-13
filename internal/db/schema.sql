@@ -339,6 +339,9 @@ CREATE TABLE IF NOT EXISTS claude_configs (
     -- Tool permissions
     allowed_tools JSONB DEFAULT '["Edit","Write","Bash","Read"]',
 
+    -- Agent teams (experimental: spawn sub-agents for complex tasks)
+    enable_teams BOOLEAN NOT NULL DEFAULT true,
+
     -- Cost controls
     max_cost_per_task NUMERIC(10,2),
     max_tokens_per_task INTEGER DEFAULT 100000,
@@ -737,3 +740,9 @@ CREATE INDEX IF NOT EXISTS idx_environments_org_repo_branch ON environments(org_
 CREATE INDEX IF NOT EXISTS idx_context_events_repo_branch ON context_events(org_id, repo_full_name, branch, sequence);
 CREATE INDEX IF NOT EXISTS idx_contexts_org_repo ON contexts(org_id, repo_full_name);
 CREATE INDEX IF NOT EXISTS idx_context_objects_org_repo ON context_objects(org_id, repo_full_name, branch);
+
+-- Add enable_teams to claude_configs (agent-teams experimental feature)
+DO $$ BEGIN
+    ALTER TABLE claude_configs ADD COLUMN IF NOT EXISTS enable_teams BOOLEAN NOT NULL DEFAULT true;
+EXCEPTION WHEN others THEN NULL;
+END $$;

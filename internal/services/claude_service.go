@@ -27,7 +27,7 @@ func NewClaudeService(database *db.DB) *ClaudeService {
 // ─── Config CRUD ────────────────────────────────────────────────────────
 
 // SaveConfig creates or updates a Claude config for an org (optionally per-user)
-func (s *ClaudeService) SaveConfig(ctx context.Context, orgID, userID, apiKey, model string, maxTurns int, allowedTools []string, maxCost float64) (*models.ClaudeConfig, error) {
+func (s *ClaudeService) SaveConfig(ctx context.Context, orgID, userID, apiKey, model string, maxTurns int, allowedTools []string, enableTeams bool, maxCost float64) (*models.ClaudeConfig, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("anthropic API key is required")
 	}
@@ -40,6 +40,7 @@ func (s *ClaudeService) SaveConfig(ctx context.Context, orgID, userID, apiKey, m
 		Model:            model,
 		MaxTurns:         maxTurns,
 		AllowedTools:     allowedTools,
+		EnableTeams:      enableTeams,
 		MaxCostPerTask:   maxCost,
 		MaxTokensPerTask: 100000,
 		CreatedAt:        time.Now(),
@@ -65,14 +66,15 @@ func (s *ClaudeService) SaveConfig(ctx context.Context, orgID, userID, apiKey, m
 
 	_, err := s.db.Pool.Exec(ctx, `
 		INSERT INTO claude_configs (id, org_id, user_id, anthropic_api_key, model, max_turns,
-			allowed_tools, max_cost_per_task, max_tokens_per_task, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			allowed_tools, enable_teams, max_cost_per_task, max_tokens_per_task, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (org_id, user_id) DO UPDATE SET
 			anthropic_api_key=EXCLUDED.anthropic_api_key, model=EXCLUDED.model,
 			max_turns=EXCLUDED.max_turns, allowed_tools=EXCLUDED.allowed_tools,
+			enable_teams=EXCLUDED.enable_teams,
 			max_cost_per_task=EXCLUDED.max_cost_per_task, updated_at=NOW()`,
 		cfg.ID, cfg.OrgID, userIDPtr, cfg.AnthropicAPIKey, cfg.Model, cfg.MaxTurns,
-		string(toolsJSON), cfg.MaxCostPerTask, cfg.MaxTokensPerTask,
+		string(toolsJSON), cfg.EnableTeams, cfg.MaxCostPerTask, cfg.MaxTokensPerTask,
 		cfg.CreatedAt, cfg.UpdatedAt,
 	)
 	if err != nil {
@@ -96,6 +98,7 @@ func (s *ClaudeService) GetConfig(ctx context.Context, orgID, userID string) (*m
 		query = `
 			SELECT id, org_id, user_id, anthropic_api_key, COALESCE(model, 'claude-sonnet-4-20250514'),
 				COALESCE(max_turns, 50), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
+				COALESCE(enable_teams, true),
 				COALESCE(max_cost_per_task, 0), COALESCE(max_tokens_per_task, 100000),
 				created_at, updated_at
 			FROM claude_configs
@@ -106,6 +109,7 @@ func (s *ClaudeService) GetConfig(ctx context.Context, orgID, userID string) (*m
 		query = `
 			SELECT id, org_id, user_id, anthropic_api_key, COALESCE(model, 'claude-sonnet-4-20250514'),
 				COALESCE(max_turns, 50), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
+				COALESCE(enable_teams, true),
 				COALESCE(max_cost_per_task, 0), COALESCE(max_tokens_per_task, 100000),
 				created_at, updated_at
 			FROM claude_configs
@@ -116,7 +120,7 @@ func (s *ClaudeService) GetConfig(ctx context.Context, orgID, userID string) (*m
 
 	err := s.db.Pool.QueryRow(ctx, query, args...).Scan(
 		&cfg.ID, &cfg.OrgID, &nullUserID, &cfg.AnthropicAPIKey, &cfg.Model, &cfg.MaxTurns,
-		&toolsJSON, &cfg.MaxCostPerTask, &cfg.MaxTokensPerTask, &cfg.CreatedAt, &cfg.UpdatedAt,
+		&toolsJSON, &cfg.EnableTeams, &cfg.MaxCostPerTask, &cfg.MaxTokensPerTask, &cfg.CreatedAt, &cfg.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil

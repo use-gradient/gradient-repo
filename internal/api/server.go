@@ -931,6 +931,64 @@ func (s *Server) orchestrateMultiAgent(orgID string, parentTask *models.AgentTas
 	fmt.Printf("[orchestrate] all %d sub-agents launched for task %s, merge simulation started\n", len(sessions), parentTask.ID)
 }
 
+func (s *Server) launchTaskWithClassification(orgID string, task *models.AgentTask) error {
+	if task == nil {
+		return fmt.Errorf("task not found")
+	}
+
+	bgCtx := context.Background()
+
+	if task.ParentTaskID != "" {
+		if err := s.taskService.StartTaskExecution(bgCtx, orgID, task.ID); err != nil {
+			return err
+		}
+		go s.taskExecutor.ExecuteTask(context.Background(), orgID, task.ID)
+		return nil
+	}
+
+	hasChildren, err := s.taskService.HasChildTasks(bgCtx, orgID, task.ID)
+	if err != nil {
+		return fmt.Errorf("failed to inspect child tasks: %w", err)
+	}
+	if hasChildren {
+		return fmt.Errorf("task is already decomposed into subtasks; rerun the failed subtask instead of the parent task")
+	}
+
+	incomingTask := &services.IncomingTask{
+		ExternalID:  task.LinearIssueID,
+		Identifier:  task.LinearIdentifier,
+		ExternalURL: task.LinearURL,
+		Title:       task.Title,
+		Description: task.Description,
+	}
+
+	classCtx, classCancel := context.WithTimeout(bgCtx, 30*time.Second)
+	defer classCancel()
+
+	classification, classErr := s.taskClassifier.ClassifyTask(classCtx, orgID, incomingTask, "")
+	if classErr != nil {
+		fmt.Printf("[task/start] classification failed for %s, defaulting to short: %v\n", task.ID, classErr)
+		classification = &services.TaskClassification{
+			Complexity:        "short",
+			EstimatedDuration: "30m",
+			Reasoning:         "Classification failed, defaulting to short task",
+		}
+	} else {
+		fmt.Printf("[task/start] classification for %s: %s (%s)\n", task.ID, classification.Complexity, classification.Reasoning)
+	}
+
+	if classification.Complexity == "long" && len(classification.SubTasks) > 1 {
+		s.orchestrateMultiAgent(orgID, task, classification, task.RepoFullName)
+		return nil
+	}
+
+	if err := s.taskService.StartTaskExecution(bgCtx, orgID, task.ID); err != nil {
+		return err
+	}
+	go s.taskExecutor.ExecuteTask(context.Background(), orgID, task.ID)
+	return nil
+}
+
 // --- Providers ---
 
 var providerRegions = map[string][]string{
@@ -2482,16 +2540,20 @@ func (s *Server) handleRateLimitStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleServeAgent serves the agent binary for Hetzner servers to download.
-// In production, host this on a CDN/GitHub Releases. For dev, the API serves it directly.
 func (s *Server) handleServeAgent(w http.ResponseWriter, r *http.Request) {
-	binaryPath := "bin/gradient-agent-linux"
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
-		writeError(w, http.StatusNotFound, "agent binary not built — run: make build-agent-linux")
-		return
+	candidates := []string{
+		"/usr/local/bin/gradient-agent", // production (Docker)
+		"bin/gradient-agent-linux",      // local dev (make build-agent-linux)
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment; filename=gradient-agent")
-	http.ServeFile(w, r, binaryPath)
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Disposition", "attachment; filename=gradient-agent")
+			http.ServeFile(w, r, path)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "agent binary not found — run: make build-agent-linux")
 }
 
 // handleClerkRedirect catches the root URL after Clerk sign-in redirect.
@@ -2578,9 +2640,10 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	autoStart := r.URL.Query().Get("auto_start")
 	if autoStart == "true" || autoStart == "1" {
 		go func() {
-			bgCtx := context.Background()
-			s.taskService.StartTaskExecution(bgCtx, orgID, task.ID)
-			s.taskExecutor.ExecuteTask(bgCtx, orgID, task.ID)
+			if err := s.launchTaskWithClassification(orgID, task); err != nil {
+				fmt.Printf("[task/start] failed to launch task %s: %v\n", task.ID, err)
+				_ = s.taskService.FailTask(context.Background(), orgID, task.ID, err.Error())
+			}
 		}()
 	}
 
@@ -2648,13 +2711,19 @@ func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request) {
 	orgID := r.Header.Get("X-Org-ID")
 	taskID := mux.Vars(r)["id"]
 
-	if err := s.taskService.StartTaskExecution(r.Context(), orgID, taskID); err != nil {
+	task, err := s.taskService.GetTask(r.Context(), orgID, taskID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if err := s.launchTaskWithClassification(orgID, task); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Kick off actual execution in the background
-	go s.taskExecutor.ExecuteTask(context.Background(), orgID, taskID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
 }
@@ -2713,12 +2782,10 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.taskService.StartTaskExecution(r.Context(), orgID, taskID); err != nil {
+	if err := s.launchTaskWithClassification(orgID, task); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	go s.taskExecutor.ExecuteTask(context.Background(), orgID, taskID)
 
 	reloaded, reloadErr := s.taskService.GetTask(r.Context(), orgID, taskID)
 	if reloadErr == nil && reloaded != nil {
@@ -2963,6 +3030,7 @@ func (s *Server) handleGetClaudeConfig(w http.ResponseWriter, r *http.Request) {
 		"model":             cfg.Model,
 		"max_turns":         cfg.MaxTurns,
 		"allowed_tools":     cfg.AllowedTools,
+		"enable_teams":      cfg.EnableTeams,
 		"max_cost_per_task": cfg.MaxCostPerTask,
 	})
 }
@@ -2976,6 +3044,7 @@ func (s *Server) handleSaveClaudeConfig(w http.ResponseWriter, r *http.Request) 
 		Model        string   `json:"model"`
 		MaxTurns     int      `json:"max_turns"`
 		AllowedTools []string `json:"allowed_tools"`
+		EnableTeams  *bool    `json:"enable_teams"`
 		MaxCost      float64  `json:"max_cost_per_task"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2983,7 +3052,12 @@ func (s *Server) handleSaveClaudeConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	cfg, err := s.claudeService.SaveConfig(r.Context(), orgID, userID, req.APIKey, req.Model, req.MaxTurns, req.AllowedTools, req.MaxCost)
+	enableTeams := true
+	if req.EnableTeams != nil {
+		enableTeams = *req.EnableTeams
+	}
+
+	cfg, err := s.claudeService.SaveConfig(r.Context(), orgID, userID, req.APIKey, req.Model, req.MaxTurns, req.AllowedTools, enableTeams, req.MaxCost)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2993,6 +3067,7 @@ func (s *Server) handleSaveClaudeConfig(w http.ResponseWriter, r *http.Request) 
 		"api_key_masked": cfg.APIKeyMasked,
 		"model":          cfg.Model,
 		"max_turns":      cfg.MaxTurns,
+		"enable_teams":   cfg.EnableTeams,
 	})
 }
 

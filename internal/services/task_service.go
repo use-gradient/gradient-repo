@@ -331,6 +331,19 @@ func (s *TaskService) RetryTask(ctx context.Context, orgID, taskID string) (*mod
 	return task, nil
 }
 
+func (s *TaskService) HasChildTasks(ctx context.Context, orgID, taskID string) (bool, error) {
+	var count int
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM agent_tasks
+		WHERE org_id = $1 AND parent_task_id = $2`,
+		orgID, taskID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // ─── Execution Flow ─────────────────────────────────────────────────────
 
 func (s *TaskService) StartTaskExecution(ctx context.Context, orgID, taskID string) error {

@@ -83,10 +83,11 @@ func newIntegrationStatusCmd() *cobra.Command {
 
 func newIntegrationClaudeCmd() *cobra.Command {
 	var (
-		apiKey   string
-		model    string
-		maxTurns int
-		remove   bool
+		apiKey      string
+		model       string
+		maxTurns    int
+		enableTeams bool
+		remove      bool
 	)
 
 	cmd := &cobra.Command{
@@ -121,9 +122,10 @@ func newIntegrationClaudeCmd() *cobra.Command {
 			}
 
 			body := map[string]interface{}{
-				"api_key":  apiKey,
-				"model":    model,
-				"max_turns": maxTurns,
+				"api_key":      apiKey,
+				"model":        model,
+				"max_turns":    maxTurns,
+				"enable_teams": enableTeams,
 			}
 
 			var result map[string]interface{}
@@ -141,6 +143,7 @@ func newIntegrationClaudeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Anthropic API key (sk-ant-...)")
 	cmd.Flags().StringVar(&model, "model", "claude-sonnet-4-20250514", "Claude model")
 	cmd.Flags().IntVar(&maxTurns, "max-turns", 50, "Max conversation turns per task")
+	cmd.Flags().BoolVar(&enableTeams, "enable-teams", true, "Enable agent teams for complex tasks")
 	cmd.Flags().BoolVar(&remove, "remove", false, "Remove Claude configuration")
 
 	return cmd

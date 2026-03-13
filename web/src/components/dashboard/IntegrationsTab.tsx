@@ -20,6 +20,7 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState(existing?.model || 'claude-sonnet-4-20250514')
   const [maxTurns, setMaxTurns] = useState(existing?.max_turns?.toString() || '50')
+  const [enableTeams, setEnableTeams] = useState(existing?.enable_teams !== false)
   const { toast } = useToast()
 
   const { mutate, loading, error } = useMutation(
@@ -31,6 +32,7 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
       api_key: apiKey,
       model,
       max_turns: parseInt(maxTurns) || 50,
+      enable_teams: enableTeams,
     })
     if (result) {
       toast('success', 'Anthropic key configured')
@@ -78,6 +80,29 @@ function ClaudeConfigModal({ open, onClose, onSaved, existing }: {
           onChange={e => setMaxTurns(e.target.value)}
           type="number"
         />
+        <label className="flex items-center gap-3 py-1 cursor-pointer">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enableTeams}
+            onClick={() => setEnableTeams(!enableTeams)}
+            className={cn(
+              'relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors',
+              enableTeams ? 'bg-primary' : 'bg-muted-foreground/30'
+            )}
+          >
+            <span className={cn(
+              'pointer-events-none block h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+              enableTeams ? 'translate-x-4' : 'translate-x-0'
+            )} />
+          </button>
+          <div>
+            <p className="text-sm font-medium text-foreground">Agent Teams</p>
+            <p className="text-xs text-muted-foreground">
+              Allow Claude to spawn teammate agents for complex multi-area tasks
+            </p>
+          </div>
+        </label>
         <p className="text-xs text-muted-foreground">
           Gradient automatically whitelists its repo memory MCP tools during task execution, so you do not need to manually add tool IDs for live context or durable guidance retrieval.
         </p>
