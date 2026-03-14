@@ -40,6 +40,12 @@ type TaskExecutorService struct {
 	maxConcurrent int
 }
 
+type TaskExecutionOptions struct {
+	ForceTeams              bool
+	TaskComplexity          string
+	ClassificationReasoning string
+}
+
 var gradientMCPAllowedTools = []string{
 	"mcp__gradient-context__get_context_updates",
 	"mcp__gradient-context__get_memory_guidance",
@@ -81,6 +87,11 @@ func NewTaskExecutorService(
 
 // ExecuteTask runs the full pipeline: provision env -> clone repo -> Claude Code -> PR.
 func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, taskID string) {
+	e.ExecuteTaskWithOptions(parentCtx, orgID, taskID, TaskExecutionOptions{})
+}
+
+// ExecuteTaskWithOptions runs the full pipeline with runtime classification hints.
+func (e *TaskExecutorService) ExecuteTaskWithOptions(parentCtx context.Context, orgID, taskID string, opts TaskExecutionOptions) {
 	e.mu.Lock()
 	if len(e.activeTasks) >= e.maxConcurrent {
 		e.mu.Unlock()
@@ -119,17 +130,23 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 			baseBranch = "main"
 		}
 	}
+	taskComplexity := strings.ToLower(strings.TrimSpace(opts.TaskComplexity))
+	if taskComplexity == "" {
+		taskComplexity = "short"
+	}
+	teamsEnabledForRun := taskComplexity == "long" || opts.ForceTeams
 	envSize := strings.TrimSpace(settings.DefaultEnvSize)
 	if envSize == "" {
 		envSize = "small"
 	}
 
 	var (
-		session         *models.AgentSession
-		initialSHA      string
-		retrievedTips   []RetrievedTip
-		guidanceSection string
-		envStateSection string
+		session              *models.AgentSession
+		initialSHA           string
+		retrievedTips        []RetrievedTip
+		guidanceSection      string
+		contextPromptSection string
+		contextDocument      string
 	)
 
 	recordBundle := func(step, status, summary string, contextDiff, decisionDiff map[string]interface{}, testResults []models.TestResult) {
@@ -188,6 +205,9 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 					"tip_count": len(generatedTips),
 				})
 		}
+		if _, materializeErr := e.memoryService.RefreshMaterializedContext(ctx, orgID, task.RepoFullName, baseBranch); materializeErr != nil {
+			log.Printf("[executor] failed to refresh materialized branch context for task %s: %v", taskID, materializeErr)
+		}
 	}
 
 	failExecution := func(message string) {
@@ -202,91 +222,56 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		runMemoryPipeline()
 	}
 
-	// ── Step 1: Provision or reuse environment ──
-	e.taskService.addLog(ctx, taskID, "provisioning_env", "started", "Looking for environment...", nil)
+	// ── Step 1: Provision a fresh environment from the latest snapshot ──
+	e.taskService.addLog(ctx, taskID, "provisioning_env", "started", "Provisioning fresh task environment...", nil)
 
-	var newEnv *models.Environment
-	reusedEnv := false
-
-	if task.RepoFullName != "" {
-		existing, _ := e.envService.GetByOrgRepoAndBranch(ctx, orgID, task.RepoFullName, baseBranch)
-		if existing != nil && existing.Status == "sleeping" {
-			if existing.Size != "" {
-				envSize = existing.Size
-			}
-			if e.billingService != nil {
-				if billingErr := e.billingService.CheckBillingAllowed(ctx, orgID, envSize); billingErr != nil {
-					failExecution(fmt.Sprintf("Billing blocked task execution: %v", billingErr))
-					return
-				}
-			}
-			e.taskService.addLog(ctx, taskID, "env_waking", "started",
-				fmt.Sprintf("Waking sleeping environment %s", existing.ID), nil)
-			if wakeErr := e.envService.WakeEnvironment(ctx, existing.ID, orgID); wakeErr == nil {
-				newEnv = existing
-				reusedEnv = true
-				if e.billingService != nil {
-					if trackErr := e.billingService.TrackUsageStart(ctx, existing.ID, orgID, envSize); trackErr != nil {
-						log.Printf("[billing] failed to track usage start for task env wake %s: %v", existing.ID, trackErr)
-					}
-				}
-			} else {
-				log.Printf("[executor] Failed to wake env %s: %v, creating new", existing.ID, wakeErr)
-			}
-		}
-	}
-
-	if newEnv == nil {
-		if e.billingService != nil {
-			if billingErr := e.billingService.CheckBillingAllowed(ctx, orgID, envSize); billingErr != nil {
-				failExecution(fmt.Sprintf("Billing blocked task execution: %v", billingErr))
-				return
-			}
-		}
-		var snapshotRef string
-		if snap, snapErr := e.snapshotStore.GetLatestByBranch(ctx, orgID, baseBranch); snapErr == nil && snap != nil {
-			snapshotRef = snap.ImageRef
-		}
-
-		var createErr error
-		newEnv, createErr = e.envService.CreateEnvironment(ctx, &CreateEnvRequest{
-			Name:          fmt.Sprintf("task-%s", taskID[:8]),
-			OrgID:         orgID,
-			Provider:      settings.DefaultEnvProvider,
-			Region:        settings.DefaultEnvRegion,
-			Size:          settings.DefaultEnvSize,
-			ContextBranch: baseBranch,
-			SnapshotRef:   snapshotRef,
-			RepoFullName:  task.RepoFullName,
-		})
-		if createErr != nil {
-			failExecution(fmt.Sprintf("Failed to provision environment: %v", createErr))
+	if e.billingService != nil {
+		if billingErr := e.billingService.CheckBillingAllowed(ctx, orgID, envSize); billingErr != nil {
+			failExecution(fmt.Sprintf("Billing blocked task execution: %v", billingErr))
 			return
 		}
-		if newEnv.Size != "" {
-			envSize = newEnv.Size
-		}
-		if e.billingService != nil {
-			if trackErr := e.billingService.TrackUsageStart(ctx, newEnv.ID, orgID, envSize); trackErr != nil {
-				log.Printf("[billing] failed to track usage start for task env create %s: %v", newEnv.ID, trackErr)
-			}
-		}
-
-		e.taskService.addLog(ctx, taskID, "env_provisioned", "completed",
-			fmt.Sprintf("Environment %s created (%s/%s)", newEnv.ID, settings.DefaultEnvProvider, envSize), nil)
 	}
+	var snapshotRef string
+	if snap, snapErr := e.snapshotStore.GetLatestByBranch(ctx, orgID, baseBranch); snapErr == nil && snap != nil {
+		snapshotRef = snap.ImageRef
+	}
+
+	newEnv, createErr := e.envService.CreateEnvironment(ctx, &CreateEnvRequest{
+		Name:          fmt.Sprintf("task-%s", taskID[:8]),
+		OrgID:         orgID,
+		Provider:      settings.DefaultEnvProvider,
+		Region:        settings.DefaultEnvRegion,
+		Size:          settings.DefaultEnvSize,
+		ContextBranch: baseBranch,
+		SnapshotRef:   snapshotRef,
+		RepoFullName:  task.RepoFullName,
+	})
+	if createErr != nil {
+		failExecution(fmt.Sprintf("Failed to provision environment: %v", createErr))
+		return
+	}
+	if newEnv.Size != "" {
+		envSize = newEnv.Size
+	}
+	if e.billingService != nil {
+		if trackErr := e.billingService.TrackUsageStart(ctx, newEnv.ID, orgID, envSize); trackErr != nil {
+			log.Printf("[billing] failed to track usage start for task env create %s: %v", newEnv.ID, trackErr)
+		}
+	}
+
+	e.taskService.addLog(ctx, taskID, "env_provisioned", "completed",
+		fmt.Sprintf("Environment %s created (%s/%s)", newEnv.ID, settings.DefaultEnvProvider, envSize), map[string]interface{}{
+			"fresh_env":    true,
+			"snapshot_ref": snapshotRef,
+		})
 
 	e.db.Pool.Exec(ctx, `UPDATE agent_tasks SET environment_id = $1, branch = $2, updated_at = NOW() WHERE id = $3`,
 		newEnv.ID, baseBranch, taskID)
 
-	if !reusedEnv || newEnv.Status != "running" {
-		if !e.waitForEnvReady(ctx, newEnv.ID, 5*time.Minute) {
-			failExecution("Environment failed to become ready within 5 minutes")
-			if !reusedEnv {
-				e.cleanupEnv(orgID, newEnv.ID)
-			}
-			return
-		}
+	if !e.waitForEnvReady(ctx, newEnv.ID, 5*time.Minute) {
+		failExecution("Environment failed to become ready within 5 minutes")
+		e.cleanupEnv(orgID, newEnv.ID)
+		return
 	}
 
 	runningEnv, _ := e.envService.GetEnvironment(ctx, newEnv.ID)
@@ -348,16 +333,9 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 				fmt.Sprintf("Cloning %s", task.RepoFullName), nil)
 
 			repoURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", ghConn.AccessToken, task.RepoFullName)
-			var cloneScript string
-			if reusedEnv {
-				cloneScript = fmt.Sprintf(
-					`set -e; cd /workspace; if [ -d repo/.git ]; then cd repo; git fetch origin 2>&1; git checkout -b %s origin/%s 2>/dev/null || git checkout %s 2>/dev/null || git checkout -b %s 2>/dev/null; else git clone --depth=50 %s repo 2>&1; cd repo; fi; git config user.email "agent@gradient.dev"; git config user.name "Gradient Agent"; echo "CLONE_OK"`,
-					taskBranch, baseBranch, taskBranch, taskBranch, repoURL)
-			} else {
-				cloneScript = fmt.Sprintf(
-					`set -e; cd /workspace; git clone --depth=50 %s repo 2>&1; cd repo; git config user.email "agent@gradient.dev"; git config user.name "Gradient Agent"; git checkout -b %s 2>/dev/null || git checkout %s; echo "CLONE_OK"`,
-					repoURL, taskBranch, taskBranch)
-			}
+			cloneScript := fmt.Sprintf(
+				`set -e; cd /workspace; rm -rf repo; git clone --depth=50 %s repo 2>&1; cd repo; git config user.email "agent@gradient.dev"; git config user.name "Gradient Agent"; git checkout -b %s 2>/dev/null || git checkout %s; echo "CLONE_OK"`,
+				repoURL, taskBranch, taskBranch)
 
 			output, cloneErr := e.execInContainer(ctx, executor, runningEnv.ClusterName, cloneScript, 5*time.Minute)
 			if cloneErr != nil || !strings.Contains(output, "CLONE_OK") {
@@ -408,10 +386,9 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		}
 	}
 
-	// ── Step 3: Load environment state, seed memory, and build prompt ──
+	// ── Step 3: Load branch context, materialize it, and build prompt ──
 	if e.contextService != nil && task.RepoFullName != "" {
 		if ctxObj, err := e.contextService.GetRepoContext(ctx, orgID, task.RepoFullName, baseBranch); err == nil && ctxObj != nil {
-			envStateSection = e.formatEnvironmentStateForPrompt(ctxObj)
 			if e.memoryService != nil {
 				if seedErr := e.memoryService.SeedTipsFromContext(ctx, task.RepoFullName, baseBranch, ctxObj); seedErr != nil {
 					log.Printf("[executor] failed to seed memory from context: %v", seedErr)
@@ -440,24 +417,44 @@ func (e *TaskExecutorService) ExecuteTask(parentCtx context.Context, orgID, task
 		}
 	}
 
-	taskPrompt := e.buildTaskPrompt(task, settings, claudeCfg.EnableTeams, guidanceSection, envStateSection)
+	if e.memoryService != nil && task.RepoFullName != "" {
+		materialized, materializeErr := e.memoryService.RefreshMaterializedContext(ctx, orgID, task.RepoFullName, baseBranch)
+		if materializeErr != nil {
+			log.Printf("[executor] failed to materialize repo context: %v", materializeErr)
+		} else if materialized != nil {
+			contextDocument = strings.TrimSpace(materialized.DocumentText)
+			contextPromptSection = e.formatContextDocumentForPrompt(contextDocument)
+		}
+	}
+	if contextPromptSection == "" && e.contextService != nil && task.RepoFullName != "" {
+		if ctxObj, err := e.contextService.GetRepoContext(ctx, orgID, task.RepoFullName, baseBranch); err == nil && ctxObj != nil {
+			contextPromptSection = e.formatEnvironmentStateForPrompt(ctxObj)
+			contextDocument = strings.TrimSpace(strings.Join([]string{ctxObj.SummaryText, ctxObj.ChangeLogText}, "\n\n"))
+		}
+	}
+
+	taskPrompt := e.buildTaskPrompt(task, settings, teamsEnabledForRun, taskComplexity, opts.ClassificationReasoning, guidanceSection, contextPromptSection)
 
 	e.taskService.addLog(ctx, taskID, "task_prompt_built", "completed", truncate(taskPrompt, 4000), map[string]interface{}{
 		"prompt_length":   len(taskPrompt),
 		"has_guidance":    guidanceSection != "",
 		"guidance_count":  len(retrievedTips),
-		"has_env_state":   envStateSection != "",
+		"has_context_doc": contextPromptSection != "",
 		"has_description": task.Description != "",
 		"has_parent_task": task.ParentTaskID != "",
 		"repo":            task.RepoFullName,
 		"base_branch":     baseBranch,
+		"task_complexity": taskComplexity,
+		"teams_enabled":   teamsEnabledForRun,
 	})
-	recordBundle("task_prompt_built", "completed", "Prompt prepared with retrieved guidance and environment state", map[string]interface{}{
+	recordBundle("task_prompt_built", "completed", "Prompt prepared with retrieved guidance and materialized branch context", map[string]interface{}{
 		"prompt_length":   len(taskPrompt),
 		"guidance_count":  len(retrievedTips),
-		"has_env_state":   envStateSection != "",
+		"has_context_doc": contextPromptSection != "",
 		"initial_sha":     initialSHA,
 		"retrieval_scope": task.RepoFullName,
+		"task_complexity": taskComplexity,
+		"teams_enabled":   teamsEnabledForRun,
 	}, map[string]interface{}{
 		"outcome": "completed",
 		"subtask": "prompt_preparation",
@@ -488,13 +485,16 @@ echo "PROMPT_OK"`, taskPrompt)
 	}
 	sessionJSON, _ := json.MarshalIndent(sessionSnapshot, "", "  ")
 
-	writeTrajectoryFilesScript := fmt.Sprintf(`mkdir -p /gradient/context; cat > /gradient/context/memory.json << 'GRADIENT_MEMORY'
+	writeTrajectoryFilesScript := fmt.Sprintf(`mkdir -p /gradient/context; cat > /gradient/context/context.md << 'GRADIENT_CONTEXT'
+%s
+GRADIENT_CONTEXT
+cat > /gradient/context/memory.json << 'GRADIENT_MEMORY'
 %s
 GRADIENT_MEMORY
 cat > /gradient/context/session.json << 'GRADIENT_SESSION'
 %s
 GRADIENT_SESSION
-echo "TRAJECTORY_FILES_OK"`, string(guidanceJSON), string(sessionJSON))
+echo "TRAJECTORY_FILES_OK"`, valueOrDefault(contextDocument, "No prior branch context has been materialized yet."), string(guidanceJSON), string(sessionJSON))
 	e.execInContainer(ctx, executor, runningEnv.ClusterName, writeTrajectoryFilesScript, 30*time.Second)
 
 	// ── Step 3.5: Set up MCP context server for cross-agent communication ──
@@ -700,6 +700,7 @@ echo "MCP_SETUP_OK"`
 			"config":           `{"mcpServers":{"gradient-context":{"command":"node","args":["/gradient/mcp-context.js"]}}}`,
 			"tools_available":  []string{"get_context_updates", "get_memory_guidance", "publish_event", "mark_subtask"},
 			"live_json_path":   "/gradient/context/live.json",
+			"context_md_path":  "/gradient/context/context.md",
 			"outbox_path":      "/gradient/context/outbox.jsonl",
 			"memory_json_path": "/gradient/context/memory.json",
 			"session_path":     "/gradient/context/session.json",
@@ -743,36 +744,39 @@ echo "MCP_SETUP_OK"`
 		log.Printf("[executor] Claude CLI found at: %s", claudeCheckTrimmed)
 	}
 
-	claudeScript := e.buildClaudeScript(claudeCfg, repoCloned, mcpReady)
+	claudeScript := e.buildClaudeScript(claudeCfg, repoCloned, mcpReady, teamsEnabledForRun)
 
 	workDir := "/workspace"
 	if repoCloned {
 		workDir = "/workspace/repo"
 	}
-	turnsPerIter := claudeCfg.MaxTurns
-	if turnsPerIter < 1 {
-		turnsPerIter = 1
+	turnsPerChunk := claudeCfg.MaxTurns
+	if turnsPerChunk < 1 {
+		turnsPerChunk = 250
 	}
+	maxTotalTurns := turnsPerChunk * 2
 	mcpFlagStr := ""
 	if mcpReady {
 		mcpFlagStr = "--mcp-config /gradient/mcp-config.json "
 	}
 	effectiveAllowedTools := allowedToolsForExecution(claudeCfg, mcpReady)
 	teamsFlag := ""
-	if claudeCfg.EnableTeams {
+	if teamsEnabledForRun {
 		teamsFlag = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 "
 	}
 	redactedCmd := fmt.Sprintf(
-		`%sexport ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose`,
-		teamsFlag, workDir, claudeCfg.Model, turnsPerIter, strings.Join(effectiveAllowedTools, ","), mcpFlagStr)
+		`%sexport ANTHROPIC_API_KEY="sk-ant-***REDACTED***" && cd %s && claude -p "..." --output-format json --model %s --max-turns %d (auto-resume up to %d total) --allowedTools "%s" %s--verbose`,
+		teamsFlag, workDir, claudeCfg.Model, turnsPerChunk, maxTotalTurns, strings.Join(effectiveAllowedTools, ","), mcpFlagStr)
 	e.taskService.addLog(ctx, taskID, "claude_invocation", "started", redactedCmd, map[string]interface{}{
 		"model":               claudeCfg.Model,
-		"max_turns_total":     claudeCfg.MaxTurns,
-		"turns_per_iteration": turnsPerIter,
-		"max_iterations":      1,
+		"turns_per_chunk":     turnsPerChunk,
+		"max_total_turns":     maxTotalTurns,
+		"max_iterations":      2,
+		"auto_resume":         true,
 		"allowed_tools":       effectiveAllowedTools,
 		"mcp_enabled":         mcpReady,
-		"agent_teams_enabled": claudeCfg.EnableTeams,
+		"agent_teams_enabled": teamsEnabledForRun,
+		"task_complexity":     taskComplexity,
 		"work_dir":            workDir,
 		"repo_cloned":         repoCloned,
 	})
@@ -805,17 +809,7 @@ echo "MCP_SETUP_OK"`
 			"failure_signature": normalizedKey(fatalClaudeError),
 		}, nil)
 		failExecution(fatalClaudeError)
-		if task.RepoFullName != "" {
-			if err := e.envService.SleepEnvironment(ctx, newEnv.ID, orgID); err != nil {
-				log.Printf("[executor] Failed to sleep env %s after task failure: %v", newEnv.ID, err)
-			} else if e.billingService != nil {
-				if trackErr := e.billingService.TrackUsageStop(ctx, newEnv.ID); trackErr != nil {
-					log.Printf("[billing] failed to track usage stop after task failure for env %s: %v", newEnv.ID, trackErr)
-				}
-			}
-		} else if settings.AutoDestroyEnv {
-			e.cleanupEnv(orgID, newEnv.ID)
-		}
+		e.cleanupEnv(orgID, newEnv.ID)
 		return
 	}
 	e.taskService.addLog(ctx, taskID, "claude_done", "completed",
@@ -834,19 +828,50 @@ echo "MCP_SETUP_OK"`
 	var commitSHA, prURL string
 
 	if repoCloned {
-		shaOut, _ := e.execInContainer(ctx, executor, runningEnv.ClusterName,
-			"cd /workspace/repo && git rev-parse HEAD 2>/dev/null", 15*time.Second)
-		commitSHA = strings.TrimSpace(shaOut)
+		gitState, gitStateErr := e.inspectGitState(ctx, executor, runningEnv.ClusterName, baseBranch)
+		if gitStateErr != nil {
+			failExecution(fmt.Sprintf("Failed to inspect git state: %v", gitStateErr))
+			e.cleanupEnv(orgID, newEnv.ID)
+			return
+		}
+		log.Printf("[executor] Git state for task %s: ahead=%t dirty=%t head=%s", taskID[:8], gitState.HasNewCommits, gitState.DirtyWorktree, truncate(gitState.CommitSHA, 16))
 
-		// Check if Claude actually made any new commits on the task branch
-		diffCheck, _ := e.execInContainer(ctx, executor, runningEnv.ClusterName,
-			fmt.Sprintf(`cd /workspace/repo && git log --oneline origin/%s..HEAD 2>/dev/null | head -20`, baseBranch), 15*time.Second)
-		diffCheckTrimmed := strings.TrimSpace(diffCheck)
-		log.Printf("[executor] Git diff check for task %s: %s", taskID[:8], truncate(diffCheckTrimmed, 300))
-		hasNewCommits := diffCheckTrimmed != "" && diffCheckTrimmed != "NO_NEW_COMMITS"
+		if !gitState.HasNewCommits && gitState.DirtyWorktree {
+			autoCommitMessage := fmt.Sprintf("gradient: finalize task %s", task.ID[:8])
+			autoCommitSHA, autoCommitOut, autoCommitErr := e.createFallbackCommit(ctx, executor, runningEnv.ClusterName, autoCommitMessage)
+			if autoCommitErr != nil {
+				e.taskService.addLog(ctx, taskID, "auto_commit_failed", "failed",
+					fmt.Sprintf("Fallback commit failed: %s", truncate(autoCommitOut, 500)), nil)
+				recordBundle("auto_commit_failed", "failed", truncate(autoCommitOut, 500), nil, map[string]interface{}{
+					"outcome":           "failed",
+					"subtask":           "git_commit",
+					"failure_signature": normalizedKey(autoCommitOut),
+				}, nil)
+				failExecution(fmt.Sprintf("Fallback commit failed: %s", truncate(autoCommitOut, 300)))
+				e.cleanupEnv(orgID, newEnv.ID)
+				return
+			}
+			commitSHA = autoCommitSHA
+			gitState.HasNewCommits = true
+			gitState.DirtyWorktree = false
+			e.taskService.addLog(ctx, taskID, "auto_commit_created", "completed",
+				fmt.Sprintf("Created fallback commit %s", truncate(autoCommitSHA, 12)), map[string]interface{}{
+					"commit_sha": autoCommitSHA,
+				})
+			recordBundle("auto_commit_created", "completed", "Fallback commit created by orchestrator", map[string]interface{}{
+				"commit_sha": autoCommitSHA,
+			}, map[string]interface{}{
+				"outcome": "completed",
+				"subtask": "git_commit",
+				"summary": autoCommitMessage,
+			}, nil)
+		}
+		if commitSHA == "" {
+			commitSHA = gitState.CommitSHA
+		}
 
 		pushSucceeded := false
-		if hasNewCommits {
+		if gitState.HasNewCommits {
 			pushScript := fmt.Sprintf("cd /workspace/repo && git push origin %s 2>&1 && echo 'PUSH_OK'", taskBranch)
 			pushOut, pushErr := e.execInContainer(ctx, executor, runningEnv.ClusterName, pushScript, 2*time.Minute)
 			if pushErr != nil || !strings.Contains(pushOut, "PUSH_OK") {
@@ -872,8 +897,8 @@ echo "MCP_SETUP_OK"`
 			}
 		} else {
 			log.Printf("[executor] No new commits for task %s, skipping push", taskID[:8])
-			e.taskService.addLog(ctx, taskID, "push_skipped", "completed",
-				"No new commits were made by Claude, skipping push and PR", nil)
+			e.taskService.addLog(ctx, taskID, "push_skipped_no_changes", "completed",
+				"No committed or uncommitted repo changes were detected, skipping push and PR", nil)
 		}
 
 		if settings.AutoCreatePR && task.RepoFullName != "" && pushSucceeded {
@@ -910,20 +935,31 @@ echo "MCP_SETUP_OK"`
 					}
 				}
 			}
-		} else if settings.AutoCreatePR && !pushSucceeded && hasNewCommits {
+		} else if settings.AutoCreatePR && !pushSucceeded && gitState.HasNewCommits {
 			e.taskService.addLog(ctx, taskID, "pr_skipped", "failed",
 				"Skipping PR creation because git push failed", nil)
+		} else if settings.AutoCreatePR && !gitState.HasNewCommits {
+			e.taskService.addLog(ctx, taskID, "pr_skipped_no_changes", "completed",
+				"Skipping PR creation because there are no repo changes to publish", nil)
 		}
 	}
 
 	// ── Step 6: Save context, snapshot, and complete ──
 	contextSaved := false
 	if e.contextService != nil && task.RepoFullName != "" {
+		var existingContext *models.Context
+		existingContext, _ = e.contextService.GetRepoContext(ctx, orgID, task.RepoFullName, baseBranch)
 		_, saveErr := e.contextService.SaveContext(ctx, &SaveContextRequest{
-			Branch:       baseBranch,
-			OrgID:        orgID,
-			CommitSHA:    commitSHA,
-			RepoFullName: task.RepoFullName,
+			Branch:            baseBranch,
+			OrgID:             orgID,
+			CommitSHA:         commitSHA,
+			RepoFullName:      task.RepoFullName,
+			InstalledPackages: packagesFromContext(existingContext),
+			PreviousFailures:  failuresFromContext(existingContext),
+			AttemptedFixes:    fixesFromContext(existingContext),
+			Patterns:          patternsFromContext(existingContext),
+			GlobalConfigs:     configsFromContext(existingContext),
+			BaseOS:            baseOSFromContext(existingContext),
 		})
 		if saveErr != nil {
 			log.Printf("[executor] Failed to save context: %v", saveErr)
@@ -940,9 +976,12 @@ echo "MCP_SETUP_OK"`
 
 	outputSummary := e.extractSummary(claudeOutput)
 	outputJSON := map[string]interface{}{
-		"claude_output_markdown":  truncate(claudeOutput, 50000),
-		"claude_output_bytes":     len(claudeOutput),
-		"claude_output_truncated": len(claudeOutput) > 50000,
+		"claude_output_markdown":    truncate(claudeOutput, 50000),
+		"claude_output_bytes":       len(claudeOutput),
+		"claude_output_truncated":   len(claudeOutput) > 50000,
+		"materialized_context_markdown": truncate(contextDocument, 30000),
+		"agent_teams_enabled":       teamsEnabledForRun,
+		"task_complexity":           taskComplexity,
 	}
 
 	e.taskService.CompleteTask(ctx, orgID, taskID, CompleteTaskRequest{
@@ -978,20 +1017,7 @@ echo "MCP_SETUP_OK"`
 		}
 	}
 
-	if task.RepoFullName != "" {
-		if err := e.envService.SleepEnvironment(ctx, newEnv.ID, orgID); err != nil {
-			log.Printf("[executor] Failed to sleep env %s after task: %v", newEnv.ID, err)
-		} else {
-			log.Printf("[executor] Environment %s put to sleep after task completion", newEnv.ID)
-			if e.billingService != nil {
-				if trackErr := e.billingService.TrackUsageStop(ctx, newEnv.ID); trackErr != nil {
-					log.Printf("[billing] failed to track usage stop after task completion for env %s: %v", newEnv.ID, trackErr)
-				}
-			}
-		}
-	} else if settings.AutoDestroyEnv {
-		e.cleanupEnv(orgID, newEnv.ID)
-	}
+	e.cleanupEnv(orgID, newEnv.ID)
 
 	runMemoryPipeline()
 
@@ -1046,7 +1072,7 @@ func (e *TaskExecutorService) waitForEnvReady(ctx context.Context, envID string,
 	}
 }
 
-func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *models.TaskSettings, enableTeams bool, guidanceSection, envStateSection string) string {
+func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *models.TaskSettings, enableTeams bool, taskComplexity, classificationReasoning, guidanceSection, contextSection string) string {
 	var sb strings.Builder
 	sb.WriteString("# Task\n\n")
 	sb.WriteString(task.Title)
@@ -1071,12 +1097,15 @@ func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *
 
 	if enableTeams {
 		sb.WriteString("\n## Agent Teams\n\n")
-		sb.WriteString("Agent Teams are enabled. For complex tasks that involve multiple distinct areas of work ")
-		sb.WriteString("(e.g., frontend + backend, multiple independent modules, docs + code + tests), ")
-		sb.WriteString("you can and should spawn teammate agents to work in parallel.\n")
-		sb.WriteString("- Decompose the task into independent subtasks and delegate them to teammates.\n")
-		sb.WriteString("- Each teammate works in the same repo but on different areas — coordinate via file ownership.\n")
-		sb.WriteString("- Use teams proactively for cross-cutting changes, multi-file refactors, or any task that benefits from parallelism.\n")
+		sb.WriteString("Claude Teams is enabled for this run because the task was classified as long or multi-area.\n")
+		if classificationReasoning != "" {
+			sb.WriteString(fmt.Sprintf("- Classification reason: %s\n", classificationReasoning))
+		}
+		sb.WriteString("- Use teammate agents internally for parallel exploration and scoped implementation.\n")
+		sb.WriteString("- Keep the overall branch coherent and consolidate findings back into a single finished result.\n")
+	} else if taskComplexity != "" {
+		sb.WriteString("\n## Execution Mode\n\n")
+		sb.WriteString(fmt.Sprintf("This task is classified as `%s`. Run it as a single Claude Code workflow without teammate agents unless the task clearly expands beyond this scope.\n", taskComplexity))
 	}
 
 	if guidanceSection != "" {
@@ -1084,25 +1113,19 @@ func (e *TaskExecutorService) buildTaskPrompt(task *models.AgentTask, settings *
 		sb.WriteString(guidanceSection)
 		sb.WriteString("\n\n")
 	}
-	if envStateSection != "" {
-		sb.WriteString(envStateSection)
+	if contextSection != "" {
+		sb.WriteString(contextSection)
 		sb.WriteString("\n\n")
 	}
 
 	sb.WriteString("\n## Context Awareness\n\n")
 	sb.WriteString("You have access to `get_context_updates`, `get_memory_guidance`, `publish_event`, and `mark_subtask` MCP tools.\n")
-	sb.WriteString("- Before starting a major subtask, call `get_memory_guidance` with the subtask name if you need targeted prior guidance.\n")
+	sb.WriteString("- Repo and branch context has already been materialized into this prompt and is also available at `/gradient/context/context.md`.\n")
+	sb.WriteString("- Call `get_memory_guidance` at most once if you need targeted prior guidance for a specific subtask, failure signature, or goal.\n")
 	sb.WriteString("- Call `mark_subtask` when a subtask starts, completes, fails, or becomes blocked.\n")
-	sb.WriteString("**After completing each sub-task** (e.g., after a commit, after running tests, after installing packages), call `get_context_updates` to check for operational updates from the system or other agents.\n")
-	sb.WriteString("- If `get_context_updates` returns new information, incorporate it before proceeding.\n")
+	sb.WriteString("- `get_context_updates` is fallback-only: use it if you believe another active agent changed the repo or environment mid-run and you need to reconcile.\n")
 	sb.WriteString("- Use `publish_event` to share important discoveries: errors encountered, package installs, configuration changes, contract updates, or key decisions.\n")
-
-	if task.ParentTaskID != "" {
-		sb.WriteString("\n## Cross-Agent Collaboration\n\n")
-		sb.WriteString("You are one of several agents working on this task in parallel. Other agents are handling different parts.\n")
-		sb.WriteString("- Call `get_context_updates` frequently — other agents may have installed packages, changed configs, or encountered errors that affect your work.\n")
-		sb.WriteString("- Publish events immediately when you make changes that could affect other agents, and mark subtask boundaries so the shared memory stays attributable.\n")
-	}
+	sb.WriteString("- Publish events immediately when you make changes that could affect future runs, and keep subtask boundaries attributable.\n")
 
 	return sb.String()
 }
@@ -1135,7 +1158,16 @@ func (e *TaskExecutorService) formatEnvironmentStateForPrompt(ctxObj *models.Con
 	return strings.TrimSpace(sb.String())
 }
 
-func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRepo bool, mcpEnabled bool) string {
+func (e *TaskExecutorService) formatContextDocumentForPrompt(document string) string {
+	document = strings.TrimSpace(document)
+	if document == "" {
+		return ""
+	}
+
+	return "## Materialized Branch Context\n\n" + truncate(document, 12000)
+}
+
+func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRepo bool, mcpEnabled bool, teamsEnabled bool) string {
 	workDir := "/workspace"
 	if hasRepo {
 		workDir = "/workspace/repo"
@@ -1147,13 +1179,15 @@ func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRep
 		mcpFlag = "--mcp-config /gradient/mcp-config.json "
 	}
 
-	maxTurns := cfg.MaxTurns
-	if maxTurns < 1 {
-		maxTurns = 1
+	turnsPerChunk := cfg.MaxTurns
+	if turnsPerChunk < 1 {
+		turnsPerChunk = 250
 	}
+	maxTotalTurns := turnsPerChunk * 2
+	maxIterations := 2
 
 	teamsExport := ""
-	if cfg.EnableTeams {
+	if teamsEnabled {
 		teamsExport = `export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 `
 	}
@@ -1161,12 +1195,52 @@ func (e *TaskExecutorService) buildClaudeScript(cfg *models.ClaudeConfig, hasRep
 	return fmt.Sprintf(`export ANTHROPIC_API_KEY="%s"
 %scd %s
 
-claude -p "$(cat /gradient/task-prompt.md)" --output-format text --model %s --max-turns %d --allowedTools "%s" %s--verbose 2>&1
-STATUS=$?
-echo "[gradient] Claude execution complete after 1 iteration(s)"
-exit $STATUS`,
+TOTAL_TURNS=0
+MAX_TOTAL=%d
+PER_CHUNK=%d
+MAX_ITERS=%d
+SESSION=""
+ITER=0
+VERBOSE_LOG=/gradient/claude-verbose.log
+> "$VERBOSE_LOG"
+
+while [ $TOTAL_TURNS -lt $MAX_TOTAL ] && [ $ITER -lt $MAX_ITERS ]; do
+  ITER=$((ITER + 1))
+
+  if [ -z "$SESSION" ]; then
+    RESULT=$(claude -p "$(cat /gradient/task-prompt.md)" --output-format json --model %s --max-turns $PER_CHUNK --allowedTools "%s" %s--verbose 2>>"$VERBOSE_LOG")
+  else
+    RESULT=$(claude --resume "$SESSION" -p "Continue where you left off. The task is not yet complete." --output-format json --max-turns $PER_CHUNK --verbose 2>>"$VERBOSE_LOG")
+  fi
+  EXIT_CODE=$?
+
+  SESSION=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).session_id||'')}catch(e){console.log('')}})")
+  TURNS=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).num_turns||0)}catch(e){console.log(0)}})")
+  IS_MAX=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);console.log(j.is_max_turns===true?'true':'false')}catch(e){console.log('false')}})")
+  RESULT_TEXT=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).result||d)}catch(e){console.log(d)}})")
+
+  TOTAL_TURNS=$((TOTAL_TURNS + TURNS))
+
+  if [ "$IS_MAX" != "true" ]; then
+    echo "$RESULT_TEXT"
+    echo "[gradient] Claude execution complete after $ITER iteration(s) ($TOTAL_TURNS total turns)"
+    exit $EXIT_CODE
+  fi
+
+  echo "[gradient] Iteration $ITER used $TURNS turns (total: $TOTAL_TURNS/$MAX_TOTAL), auto-resuming session..." >&2
+done
+
+if [ "$IS_MAX" = "true" ]; then
+  echo "$RESULT_TEXT"
+  echo "[gradient] Claude exhausted turn budget ($TOTAL_TURNS/$MAX_TOTAL turns across $ITER iterations)"
+  exit 1
+fi
+
+echo "$RESULT_TEXT"
+echo "[gradient] Claude execution complete after $ITER iteration(s) ($TOTAL_TURNS total turns)"`,
 		cfg.AnthropicAPIKey, teamsExport, workDir,
-		cfg.Model, maxTurns, tools, mcpFlag,
+		maxTotalTurns, turnsPerChunk, maxIterations,
+		cfg.Model, tools, mcpFlag,
 	)
 }
 
@@ -1274,6 +1348,12 @@ func (e *TaskExecutorService) extractSummary(output string) string {
 	return truncate(combined, 2000)
 }
 
+type gitState struct {
+	CommitSHA     string
+	HasNewCommits bool
+	DirtyWorktree bool
+}
+
 func (e *TaskExecutorService) failTask(ctx context.Context, orgID, taskID, msg string) {
 	e.taskService.FailTask(ctx, orgID, taskID, msg)
 }
@@ -1289,6 +1369,87 @@ func (e *TaskExecutorService) cleanupEnv(orgID, envID string) {
 	}
 }
 
+func (e *TaskExecutorService) inspectGitState(ctx context.Context, executor env.RemoteExecutor, providerRef, baseBranch string) (*gitState, error) {
+	shaOut, shaErr := e.execInContainer(ctx, executor, providerRef, "cd /workspace/repo && git rev-parse HEAD 2>/dev/null", 15*time.Second)
+	if shaErr != nil {
+		return nil, shaErr
+	}
+	aheadOut, aheadErr := e.execInContainer(ctx, executor, providerRef,
+		fmt.Sprintf(`cd /workspace/repo && git log --oneline origin/%s..HEAD 2>/dev/null | head -20`, baseBranch), 15*time.Second)
+	if aheadErr != nil {
+		return nil, aheadErr
+	}
+	statusOut, statusErr := e.execInContainer(ctx, executor, providerRef,
+		`cd /workspace/repo && git status --porcelain 2>/dev/null`, 15*time.Second)
+	if statusErr != nil {
+		return nil, statusErr
+	}
+	return &gitState{
+		CommitSHA:     strings.TrimSpace(shaOut),
+		HasNewCommits: strings.TrimSpace(aheadOut) != "",
+		DirtyWorktree: strings.TrimSpace(statusOut) != "",
+	}, nil
+}
+
+func (e *TaskExecutorService) createFallbackCommit(ctx context.Context, executor env.RemoteExecutor, providerRef, message string) (string, string, error) {
+	script := fmt.Sprintf(`cd /workspace/repo && git add -A && git commit -m %s 2>&1 && git rev-parse HEAD`, shellQuote(message))
+	out, err := e.execInContainer(ctx, executor, providerRef, script, 2*time.Minute)
+	if err != nil {
+		return "", out, err
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 0 {
+		return "", out, fmt.Errorf("empty commit output")
+	}
+	sha := strings.TrimSpace(lines[len(lines)-1])
+	if sha == "" {
+		return "", out, fmt.Errorf("missing commit sha from fallback commit")
+	}
+	return sha, out, nil
+}
+
+func packagesFromContext(ctxObj *models.Context) []models.InstalledPackage {
+	if ctxObj == nil || ctxObj.InstalledPackages == nil {
+		return []models.InstalledPackage{}
+	}
+	return ctxObj.InstalledPackages
+}
+
+func failuresFromContext(ctxObj *models.Context) []models.TestFailure {
+	if ctxObj == nil || ctxObj.PreviousFailures == nil {
+		return []models.TestFailure{}
+	}
+	return ctxObj.PreviousFailures
+}
+
+func fixesFromContext(ctxObj *models.Context) []models.Fix {
+	if ctxObj == nil || ctxObj.AttemptedFixes == nil {
+		return []models.Fix{}
+	}
+	return ctxObj.AttemptedFixes
+}
+
+func patternsFromContext(ctxObj *models.Context) map[string]interface{} {
+	if ctxObj == nil || ctxObj.Patterns == nil {
+		return map[string]interface{}{}
+	}
+	return ctxObj.Patterns
+}
+
+func configsFromContext(ctxObj *models.Context) map[string]string {
+	if ctxObj == nil || ctxObj.GlobalConfigs == nil {
+		return map[string]string{}
+	}
+	return ctxObj.GlobalConfigs
+}
+
+func baseOSFromContext(ctxObj *models.Context) string {
+	if ctxObj == nil || strings.TrimSpace(ctxObj.BaseOS) == "" {
+		return "ubuntu-24.04"
+	}
+	return ctxObj.BaseOS
+}
+
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -1301,7 +1462,7 @@ func detectClaudeFatalError(output string, execErr error) string {
 	lower := strings.ToLower(text)
 
 	fatalPatterns := []string{
-		"reached max turns",
+		"exhausted turn budget",
 		"invalid api key",
 		"fix external api key",
 		"authentication failed",

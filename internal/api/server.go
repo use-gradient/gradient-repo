@@ -705,26 +705,17 @@ func startLinearPoller(
 
 				fmt.Printf("[poller] created task %s for issue %s, classifying...\n", task.ID, ident)
 
-				go func(orgID, taskID, issueIdent string) {
-					bgCtx := context.Background()
-
-					incomingTask := &services.IncomingTask{
-						ExternalID:  issueID,
-						Identifier:  ident,
-						ExternalURL: issueURL,
-						Title:       title,
-						Description: desc,
+				go func(orgID string, createdTask *models.AgentTask, issueIdent string) {
+					server := &Server{
+						taskService:   taskService,
+						taskExecutor:  taskExecutor,
+						taskClassifier: taskClassifier,
 					}
-					classification, classErr := taskClassifier.ClassifyTask(bgCtx, orgID, incomingTask, "")
-					if classErr != nil {
-						fmt.Printf("[poller] classification failed for %s, defaulting to short: %v\n", issueIdent, classErr)
-						classification = &services.TaskClassification{Complexity: "short"}
+					if err := server.launchTaskWithClassification(orgID, createdTask); err != nil {
+						fmt.Printf("[poller] failed to launch task %s for %s: %v\n", createdTask.ID, issueIdent, err)
+						_ = taskService.FailTask(context.Background(), orgID, createdTask.ID, err.Error())
 					}
-					_ = classification
-
-					taskService.StartTaskExecution(bgCtx, orgID, taskID)
-					taskExecutor.ExecuteTask(bgCtx, orgID, taskID)
-				}(conn.OrgID, task.ID, ident)
+				}(conn.OrgID, task, ident)
 			}
 		}
 	}
@@ -829,32 +820,17 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[webhook/linear] created task %s, classifying...\n", task.ID)
 
-	// Use a background context — Linear webhooks time out in ~5s but classification needs ~10s
-	classCtx, classCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer classCancel()
-
-	classification, classErr := s.taskClassifier.ClassifyTask(classCtx, orgID, incomingTask, "")
-	if classErr != nil {
-		fmt.Printf("[webhook/linear] classification failed, defaulting to short: %v\n", classErr)
-		classification = &services.TaskClassification{Complexity: "short"}
-	}
-
-	fmt.Printf("[webhook/linear] classification: %s (%s)\n", classification.Complexity, classification.Reasoning)
-
-	if classification.Complexity == "long" && len(classification.SubTasks) > 1 {
-		s.orchestrateMultiAgent(orgID, task, classification, repoFullName)
-	} else {
-		go func() {
-			bgCtx := context.Background()
-			s.taskService.StartTaskExecution(bgCtx, orgID, task.ID)
-			s.taskExecutor.ExecuteTask(bgCtx, orgID, task.ID)
-		}()
-	}
+	go func() {
+		if err := s.launchTaskWithClassification(orgID, task); err != nil {
+			fmt.Printf("[webhook/linear] failed to launch task %s: %v\n", task.ID, err)
+			_ = s.taskService.FailTask(context.Background(), orgID, task.ID, err.Error())
+		}
+	}()
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":     "ok",
 		"task_id":    task.ID,
-		"complexity": classification.Complexity,
+		"complexity": "pending_classification",
 	})
 }
 
@@ -938,22 +914,6 @@ func (s *Server) launchTaskWithClassification(orgID string, task *models.AgentTa
 
 	bgCtx := context.Background()
 
-	if task.ParentTaskID != "" {
-		if err := s.taskService.StartTaskExecution(bgCtx, orgID, task.ID); err != nil {
-			return err
-		}
-		go s.taskExecutor.ExecuteTask(context.Background(), orgID, task.ID)
-		return nil
-	}
-
-	hasChildren, err := s.taskService.HasChildTasks(bgCtx, orgID, task.ID)
-	if err != nil {
-		return fmt.Errorf("failed to inspect child tasks: %w", err)
-	}
-	if hasChildren {
-		return fmt.Errorf("task is already decomposed into subtasks; rerun the failed subtask instead of the parent task")
-	}
-
 	incomingTask := &services.IncomingTask{
 		ExternalID:  task.LinearIssueID,
 		Identifier:  task.LinearIdentifier,
@@ -976,16 +936,23 @@ func (s *Server) launchTaskWithClassification(orgID string, task *models.AgentTa
 	} else {
 		fmt.Printf("[task/start] classification for %s: %s (%s)\n", task.ID, classification.Complexity, classification.Reasoning)
 	}
-
-	if classification.Complexity == "long" && len(classification.SubTasks) > 1 {
-		s.orchestrateMultiAgent(orgID, task, classification, task.RepoFullName)
-		return nil
-	}
+	forceTeams := strings.EqualFold(classification.Complexity, "long")
+	s.taskService.AddLog(context.Background(), task.ID, "task_classified", "completed",
+		fmt.Sprintf("Task classified as %s", classification.Complexity), map[string]interface{}{
+			"complexity":   classification.Complexity,
+			"reasoning":    classification.Reasoning,
+			"force_teams":  forceTeams,
+			"subtask_count": len(classification.SubTasks),
+		})
 
 	if err := s.taskService.StartTaskExecution(bgCtx, orgID, task.ID); err != nil {
 		return err
 	}
-	go s.taskExecutor.ExecuteTask(context.Background(), orgID, task.ID)
+	go s.taskExecutor.ExecuteTaskWithOptions(context.Background(), orgID, task.ID, services.TaskExecutionOptions{
+		ForceTeams:              forceTeams,
+		TaskComplexity:          classification.Complexity,
+		ClassificationReasoning: classification.Reasoning,
+	})
 	return nil
 }
 
@@ -1214,6 +1181,7 @@ func (s *Server) handleSnapshotEnvironment(w http.ResponseWriter, r *http.Reques
 
 type saveContextRequest struct {
 	Branch            string                    `json:"branch"`
+	RepoFullName      string                    `json:"repo_full_name"`
 	CommitSHA         string                    `json:"commit_sha"`
 	InstalledPackages []models.InstalledPackage `json:"installed_packages"`
 	PreviousFailures  []models.TestFailure      `json:"previous_failures"`
@@ -1240,6 +1208,7 @@ func (s *Server) handleSaveContext(w http.ResponseWriter, r *http.Request) {
 	ctx, err := s.contextService.SaveContext(r.Context(), &services.SaveContextRequest{
 		Branch:            req.Branch,
 		OrgID:             orgID,
+		RepoFullName:      req.RepoFullName,
 		CommitSHA:         req.CommitSHA,
 		InstalledPackages: req.InstalledPackages,
 		PreviousFailures:  req.PreviousFailures,
@@ -1252,6 +1221,11 @@ func (s *Server) handleSaveContext(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if s.memoryService != nil && req.RepoFullName != "" {
+		if _, materializeErr := s.memoryService.RefreshMaterializedContext(r.Context(), orgID, req.RepoFullName, req.Branch); materializeErr != nil {
+			log.Printf("[context] failed to refresh materialized context for %s@%s: %v", req.RepoFullName, req.Branch, materializeErr)
+		}
+	}
 
 	writeJSON(w, http.StatusCreated, ctx)
 }
@@ -1260,14 +1234,23 @@ func (s *Server) handleGetContext(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	branch := vars["branch"]
 	orgID := GetOrgID(r.Context())
+	repoFullName := strings.TrimSpace(r.URL.Query().Get("repo_full_name"))
 
-	ctx, err := s.contextService.GetContext(r.Context(), orgID, branch)
+	var (
+		ctxObj *models.Context
+		err   error
+	)
+	if repoFullName != "" {
+		ctxObj, err = s.contextService.GetRepoContext(r.Context(), orgID, repoFullName, branch)
+	} else {
+		ctxObj, err = s.contextService.GetContext(r.Context(), orgID, branch)
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ctx)
+	writeJSON(w, http.StatusOK, ctxObj)
 }
 
 func (s *Server) handleListContexts(w http.ResponseWriter, r *http.Request) {

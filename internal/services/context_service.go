@@ -28,6 +28,8 @@ type SaveContextRequest struct {
 	AttemptedFixes    []models.Fix
 	Patterns          map[string]interface{}
 	GlobalConfigs     map[string]string
+	SummaryText       string
+	ChangeLogText     string
 	BaseOS            string
 }
 
@@ -71,6 +73,8 @@ func (s *ContextService) SaveContext(ctx context.Context, req *SaveContextReques
 		AttemptedFixes:    req.AttemptedFixes,
 		Patterns:          req.Patterns,
 		GlobalConfigs:     req.GlobalConfigs,
+		SummaryText:       req.SummaryText,
+		ChangeLogText:     req.ChangeLogText,
 		BaseOS:            baseOS,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -100,4 +104,8 @@ func (s *ContextService) ListContexts(ctx context.Context, orgID string) ([]*mod
 
 func (s *ContextService) DeleteContext(ctx context.Context, orgID, branch string) error {
 	return s.store.Delete(ctx, orgID, branch)
+}
+
+func (s *ContextService) UpdateMaterializedContext(ctx context.Context, orgID, repoFullName, branch, summaryText, changeLogText string) error {
+	return s.store.UpdateMaterialized(ctx, orgID, repoFullName, branch, summaryText, changeLogText)
 }

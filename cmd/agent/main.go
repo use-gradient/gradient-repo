@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -48,6 +49,7 @@ type AgentConfig struct {
 	APIURL           string
 	EnvID            string
 	OrgID            string
+	RepoFullName     string
 	AuthToken        string
 	EnvName          string
 	Branch           string
@@ -88,6 +90,7 @@ func loadConfig() *AgentConfig {
 		APIURL:           getEnv("GRADIENT_API_URL", ""),
 		EnvID:            getEnv("GRADIENT_ENV_ID", ""),
 		OrgID:            getEnv("GRADIENT_ORG_ID", ""),
+		RepoFullName:     getEnv("GRADIENT_REPO_FULL_NAME", ""),
 		AuthToken:        getEnv("GRADIENT_AUTH_TOKEN", ""),
 		EnvName:          getEnv("GRADIENT_ENV_NAME", "unknown"),
 		Branch:           getEnv("GRADIENT_BRANCH", ""),
@@ -923,8 +926,11 @@ func replayContext(cfg *AgentConfig) {
 	}
 
 	// Fetch saved context from API
-	url := fmt.Sprintf("%s/api/v1/contexts/%s", cfg.APIURL, cfg.Branch)
-	req, err := http.NewRequest("GET", url, nil)
+	contextURL := fmt.Sprintf("%s/api/v1/contexts/%s", cfg.APIURL, cfg.Branch)
+	if cfg.RepoFullName != "" {
+		contextURL += "?repo_full_name=" + url.QueryEscape(cfg.RepoFullName)
+	}
+	req, err := http.NewRequest("GET", contextURL, nil)
 	if err != nil {
 		log.Printf("[agent] Failed to create context request: %v", err)
 		return
@@ -950,14 +956,14 @@ func replayContext(cfg *AgentConfig) {
 	}
 
 	var ctxData struct {
-		Data struct {
-			InstalledPackages []struct {
-				Manager string `json:"manager"`
-				Name    string `json:"name"`
-				Version string `json:"version"`
-			} `json:"installed_packages"`
-			EnvironmentVars map[string]string `json:"environment_vars"`
-		} `json:"data"`
+		InstalledPackages []struct {
+			Manager string `json:"manager"`
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"installed_packages"`
+		GlobalConfigs map[string]string `json:"global_configs"`
+		SummaryText   string            `json:"summary_text"`
+		ChangeLogText string            `json:"change_log_text"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&ctxData); err != nil {
@@ -966,7 +972,7 @@ func replayContext(cfg *AgentConfig) {
 	}
 
 	// Replay package installs (v0.1: pip/npm/apt)
-	for _, pkg := range ctxData.Data.InstalledPackages {
+	for _, pkg := range ctxData.InstalledPackages {
 		installCmd := ""
 		switch pkg.Manager {
 		case "pip", "pip3":
@@ -998,7 +1004,7 @@ func replayContext(cfg *AgentConfig) {
 	}
 
 	// Replay environment vars
-	for k, v := range ctxData.Data.EnvironmentVars {
+	for k, v := range ctxData.GlobalConfigs {
 		envCmd := fmt.Sprintf("echo 'export %s=%s' >> /etc/profile.d/gradient-context.sh", k, v)
 		cmd := exec.Command("docker", "exec", "gradient-env", "sh", "-c", envCmd)
 		if _, err := cmd.CombinedOutput(); err != nil {
@@ -1006,8 +1012,18 @@ func replayContext(cfg *AgentConfig) {
 		}
 	}
 
+	contextDocument := strings.TrimSpace(strings.Join([]string{ctxData.SummaryText, ctxData.ChangeLogText}, "\n\n"))
+	if contextDocument != "" {
+		contextPath := filepath.Join(cfg.ContextDir, "context.md")
+		if err := os.WriteFile(contextPath, []byte(contextDocument), 0644); err != nil {
+			log.Printf("[agent] Context replay: failed to write materialized context: %v", err)
+		} else {
+			log.Printf("[agent] Context replay: wrote materialized context to %s", contextPath)
+		}
+	}
+
 	log.Printf("[agent] Context replay complete: %d packages, %d env vars",
-		len(ctxData.Data.InstalledPackages), len(ctxData.Data.EnvironmentVars))
+		len(ctxData.InstalledPackages), len(ctxData.GlobalConfigs))
 }
 
 // --- Snapshots ---

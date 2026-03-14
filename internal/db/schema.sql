@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS contexts (
     attempted_fixes JSONB DEFAULT '[]',
     patterns JSONB DEFAULT '{}',
     global_configs JSONB DEFAULT '{}',
+    summary_text TEXT DEFAULT '',
+    change_log_text TEXT DEFAULT '',
     base_os VARCHAR(50) DEFAULT 'ubuntu-24.04',
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
@@ -334,7 +336,7 @@ CREATE TABLE IF NOT EXISTS claude_configs (
 
     -- Model preferences
     model VARCHAR(100) DEFAULT 'claude-sonnet-4-20250514',
-    max_turns INTEGER DEFAULT 50,
+    max_turns INTEGER DEFAULT 250,
 
     -- Tool permissions
     allowed_tools JSONB DEFAULT '["Edit","Write","Bash","Read"]',
@@ -708,6 +710,16 @@ END $$;
 
 DO $$ BEGIN
     ALTER TABLE contexts ADD COLUMN IF NOT EXISTS repo_full_name VARCHAR(500) DEFAULT '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE contexts ADD COLUMN IF NOT EXISTS summary_text TEXT DEFAULT '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE contexts ADD COLUMN IF NOT EXISTS change_log_text TEXT DEFAULT '';
 EXCEPTION WHEN others THEN NULL;
 END $$;
 

@@ -187,6 +187,8 @@ type Context struct {
 	AttemptedFixes    []Fix                  `json:"attempted_fixes"`
 	Patterns          map[string]interface{} `json:"patterns"`
 	GlobalConfigs     map[string]string      `json:"global_configs"`
+	SummaryText       string                 `json:"summary_text,omitempty"`
+	ChangeLogText     string                 `json:"change_log_text,omitempty"`
 	BaseOS            string                 `json:"base_os"`
 	CreatedAt         time.Time              `json:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at"`

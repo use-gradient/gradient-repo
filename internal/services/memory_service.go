@@ -34,6 +34,12 @@ type RetrievedTip struct {
 	Reason string            `json:"reason,omitempty"`
 }
 
+type MaterializedBranchContext struct {
+	SummaryText   string `json:"summary_text"`
+	ChangeLogText string `json:"change_log_text"`
+	DocumentText  string `json:"document_text"`
+}
+
 type TrajectoryMemoryService struct {
 	db                *db.DB
 	contextService    *ContextService
@@ -424,6 +430,54 @@ func (s *TrajectoryMemoryService) BuildGuidanceSnapshot(items []RetrievedTip) ma
 	return snapshot
 }
 
+func (s *TrajectoryMemoryService) BuildMaterializedContext(ctx context.Context, orgID, repoFullName, branch string) (*MaterializedBranchContext, error) {
+	if orgID == "" || repoFullName == "" || branch == "" {
+		return &MaterializedBranchContext{}, nil
+	}
+
+	var (
+		ctxObj    *models.Context
+		tips      []*models.MemoryTip
+		analyses  []*models.TrajectoryAnalysis
+		runs      []*models.RetrievalRun
+		sessions  []*models.AgentSession
+		events    []*trajectoryEvent
+		taskItems []*models.AgentTask
+	)
+
+	if s.contextService != nil {
+		ctxObj, _ = s.contextService.GetRepoContext(ctx, orgID, repoFullName, branch)
+	}
+	tips, _ = s.listTipsByRepoBranch(ctx, orgID, repoFullName, branch, 8)
+	analyses, _ = s.listAnalysesByRepoBranch(ctx, orgID, repoFullName, branch, 6)
+	runs, _ = s.listRetrievalRunsByRepoBranch(ctx, orgID, repoFullName, branch, 4)
+	sessions, _ = s.listRecentSessionsByRepoBranch(ctx, orgID, repoFullName, branch, 6)
+	taskItems, _ = s.listRecentTasksByRepoBranch(ctx, orgID, repoFullName, branch, 8)
+	events, _ = s.listRecentEventsByRepoBranch(ctx, orgID, repoFullName, branch, 8)
+
+	summaryText := s.renderContextSummary(ctxObj, taskItems, tips, analyses, runs)
+	changeLogText := s.renderContextChangeLog(taskItems, sessions, events)
+
+	return &MaterializedBranchContext{
+		SummaryText:   summaryText,
+		ChangeLogText: changeLogText,
+		DocumentText:  strings.TrimSpace(strings.Join([]string{summaryText, changeLogText}, "\n\n")),
+	}, nil
+}
+
+func (s *TrajectoryMemoryService) RefreshMaterializedContext(ctx context.Context, orgID, repoFullName, branch string) (*MaterializedBranchContext, error) {
+	materialized, err := s.BuildMaterializedContext(ctx, orgID, repoFullName, branch)
+	if err != nil {
+		return nil, err
+	}
+	if s.contextService != nil {
+		if updateErr := s.contextService.UpdateMaterializedContext(ctx, orgID, repoFullName, branch, materialized.SummaryText, materialized.ChangeLogText); updateErr != nil {
+			return nil, updateErr
+		}
+	}
+	return materialized, nil
+}
+
 func (s *TrajectoryMemoryService) ListTipsByRepo(ctx context.Context, orgID, repoFullName string, limit int) ([]*models.MemoryTip, error) {
 	if orgID == "" || repoFullName == "" {
 		return []*models.MemoryTip{}, nil
@@ -572,6 +626,346 @@ func (s *TrajectoryMemoryService) ListRetrievalRunsByRepo(ctx context.Context, o
 		return nil, fmt.Errorf("failed iterating retrieval runs: %w", err)
 	}
 	return runs, nil
+}
+
+func (s *TrajectoryMemoryService) listTipsByRepoBranch(ctx context.Context, orgID, repoFullName, branch string, limit int) ([]*models.MemoryTip, error) {
+	tips, err := s.ListTipsByRepo(ctx, orgID, repoFullName, limit*3)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*models.MemoryTip, 0, minInt(len(tips), limit))
+	for _, tip := range tips {
+		if tip == nil {
+			continue
+		}
+		if tip.SourceBranch != "" && tip.SourceBranch != branch {
+			continue
+		}
+		filtered = append(filtered, tip)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered, nil
+	}
+	if len(tips) > limit {
+		return tips[:limit], nil
+	}
+	return tips, nil
+}
+
+func (s *TrajectoryMemoryService) listAnalysesByRepoBranch(ctx context.Context, orgID, repoFullName, branch string, limit int) ([]*models.TrajectoryAnalysis, error) {
+	analyses, err := s.ListAnalysesByRepo(ctx, orgID, repoFullName, limit*3)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*models.TrajectoryAnalysis, 0, minInt(len(analyses), limit))
+	for _, analysis := range analyses {
+		if analysis == nil {
+			continue
+		}
+		if analysis.SourceBranch != "" && analysis.SourceBranch != branch {
+			continue
+		}
+		filtered = append(filtered, analysis)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered, nil
+	}
+	if len(analyses) > limit {
+		return analyses[:limit], nil
+	}
+	return analyses, nil
+}
+
+func (s *TrajectoryMemoryService) listRetrievalRunsByRepoBranch(ctx context.Context, orgID, repoFullName, branch string, limit int) ([]*models.RetrievalRun, error) {
+	runs, err := s.ListRetrievalRunsByRepo(ctx, orgID, repoFullName, limit*3)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*models.RetrievalRun, 0, minInt(len(runs), limit))
+	for _, run := range runs {
+		if run == nil {
+			continue
+		}
+		if branch != "" && run.QueryText != "" && !strings.Contains(strings.ToLower(run.QueryText), strings.ToLower(branch)) && run.Subtask == "" && run.FailureSignature == "" {
+			continue
+		}
+		filtered = append(filtered, run)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered, nil
+	}
+	if len(runs) > limit {
+		return runs[:limit], nil
+	}
+	return runs, nil
+}
+
+func (s *TrajectoryMemoryService) listRecentSessionsByRepoBranch(ctx context.Context, orgID, repoFullName, branch string, limit int) ([]*models.AgentSession, error) {
+	sessions, err := s.sessionService.ListRecentSessionsByRepo(ctx, orgID, repoFullName, limit*3)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*models.AgentSession, 0, minInt(len(sessions), limit))
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		if session.BranchName != "" && session.BranchName != branch {
+			continue
+		}
+		filtered = append(filtered, session)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered, nil
+	}
+	if len(sessions) > limit {
+		return sessions[:limit], nil
+	}
+	return sessions, nil
+}
+
+func (s *TrajectoryMemoryService) listRecentTasksByRepoBranch(ctx context.Context, orgID, repoFullName, branch string, limit int) ([]*models.AgentTask, error) {
+	if orgID == "" || repoFullName == "" {
+		return []*models.AgentTask{}, nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, org_id, COALESCE(parent_task_id, ''), COALESCE(linear_issue_id, ''),
+		       COALESCE(linear_identifier, ''), COALESCE(linear_url, ''), title,
+		       COALESCE(description, ''), COALESCE(prompt, ''), COALESCE(environment_id, ''),
+		       COALESCE(branch, ''), COALESCE(repo_full_name, ''), status,
+		       COALESCE(output_summary, ''), COALESCE(output_json, '{}'::jsonb), COALESCE(commit_sha, ''),
+		       COALESCE(pr_url, ''), COALESCE(error_message, ''), started_at, completed_at,
+		       COALESCE(duration_seconds, 0), COALESCE(tokens_used, 0), COALESCE(estimated_cost, 0),
+		       COALESCE(retry_count, 0), COALESCE(max_retries, 0), COALESCE(context_saved, false),
+		       COALESCE(snapshot_taken, false), created_at, updated_at
+		FROM agent_tasks
+		WHERE org_id = $1 AND COALESCE(repo_full_name, '') = $2 AND COALESCE(branch, '') = $3
+		ORDER BY updated_at DESC
+		LIMIT $4
+	`, orgID, repoFullName, branch, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list repo tasks: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]*models.AgentTask, 0, limit)
+	for rows.Next() {
+		task := &models.AgentTask{}
+		var outputJSON []byte
+		if err := rows.Scan(
+			&task.ID, &task.OrgID, &task.ParentTaskID, &task.LinearIssueID, &task.LinearIdentifier,
+			&task.LinearURL, &task.Title, &task.Description, &task.Prompt, &task.EnvironmentID,
+			&task.Branch, &task.RepoFullName, &task.Status, &task.OutputSummary, &outputJSON,
+			&task.CommitSHA, &task.PRURL, &task.ErrorMessage, &task.StartedAt, &task.CompletedAt,
+			&task.DurationSeconds, &task.TokensUsed, &task.EstimatedCost, &task.RetryCount,
+			&task.MaxRetries, &task.ContextSaved, &task.SnapshotTaken, &task.CreatedAt, &task.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan repo task: %w", err)
+		}
+		_ = json.Unmarshal(outputJSON, &task.OutputJSON)
+		items = append(items, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating repo tasks: %w", err)
+	}
+	return items, nil
+}
+
+func (s *TrajectoryMemoryService) listRecentEventsByRepoBranch(ctx context.Context, orgID, repoFullName, branch string, limit int) ([]*trajectoryEvent, error) {
+	if orgID == "" || repoFullName == "" || branch == "" {
+		return []*trajectoryEvent{}, nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, event_type, data, created_at
+		FROM context_events
+		WHERE org_id = $1 AND repo_full_name = $2 AND branch = $3
+		ORDER BY created_at DESC
+		LIMIT $4
+	`, orgID, repoFullName, branch, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list repo events: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]*trajectoryEvent, 0, limit)
+	for rows.Next() {
+		var (
+			id        string
+			eventType string
+			dataJSON  []byte
+			createdAt time.Time
+		)
+		if err := rows.Scan(&id, &eventType, &dataJSON, &createdAt); err != nil {
+			return nil, fmt.Errorf("failed to scan repo event: %w", err)
+		}
+		var raw map[string]interface{}
+		if err := json.Unmarshal(dataJSON, &raw); err != nil {
+			continue
+		}
+		items = append(items, &trajectoryEvent{
+			ID:               id,
+			EventType:        eventType,
+			SessionID:        stringValue(raw["session_id"]),
+			TaskID:           stringValue(raw["task_id"]),
+			Subtask:          stringValue(raw["subtask"]),
+			Outcome:          stringValue(raw["outcome"]),
+			Summary:          firstNonEmpty(stringValue(raw["message"]), stringValue(raw["summary"])),
+			FailureSignature: normalizedKey(firstNonEmpty(stringValue(raw["failure_signature"]), stringValue(raw["error"]))),
+			RelatedFiles:     stringSliceValue(raw["related_files"]),
+			CreatedAt:        createdAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating repo events: %w", err)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].CreatedAt.Before(items[j].CreatedAt)
+	})
+	return items, nil
+}
+
+func (s *TrajectoryMemoryService) renderContextSummary(ctxObj *models.Context, tasks []*models.AgentTask, tips []*models.MemoryTip, analyses []*models.TrajectoryAnalysis, runs []*models.RetrievalRun) string {
+	var sb strings.Builder
+	sb.WriteString("## Repo Branch Context\n\n")
+	if ctxObj != nil {
+		sb.WriteString(fmt.Sprintf("- Branch: `%s`\n", ctxObj.Branch))
+		if ctxObj.CommitSHA != "" {
+			sb.WriteString(fmt.Sprintf("- Last recorded commit: `%s`\n", ctxObj.CommitSHA))
+		}
+		if ctxObj.BaseOS != "" {
+			sb.WriteString(fmt.Sprintf("- Base OS: `%s`\n", ctxObj.BaseOS))
+		}
+		sb.WriteString(fmt.Sprintf("- Last updated: %s\n", ctxObj.UpdatedAt.UTC().Format(time.RFC3339)))
+		if len(ctxObj.InstalledPackages) > 0 {
+			names := make([]string, 0, len(ctxObj.InstalledPackages))
+			for _, pkg := range ctxObj.InstalledPackages {
+				names = append(names, pkg.Name)
+			}
+			sb.WriteString("\n### Installed Packages\n")
+			for _, name := range firstNStrings(names, 10) {
+				sb.WriteString(fmt.Sprintf("- %s\n", name))
+			}
+		}
+		if len(ctxObj.GlobalConfigs) > 0 {
+			sb.WriteString("\n### Environment Config\n")
+			keys := make([]string, 0, len(ctxObj.GlobalConfigs))
+			for key := range ctxObj.GlobalConfigs {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range firstNStrings(keys, 8) {
+				sb.WriteString(fmt.Sprintf("- %s=%s\n", key, ctxObj.GlobalConfigs[key]))
+			}
+		}
+	}
+	if len(tasks) > 0 {
+		sb.WriteString("\n### Recent Task Outcomes\n")
+		for _, task := range firstNTasks(tasks, 4) {
+			outcome := firstNonEmpty(task.OutputSummary, task.ErrorMessage, task.Title)
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", strings.ToUpper(task.Status), truncate(outcome, 240)))
+		}
+	}
+	if len(analyses) > 0 {
+		sb.WriteString("\n### Attributed Learnings\n")
+		for _, analysis := range firstNAnalyses(analyses, 3) {
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", strings.ToUpper(valueOrDefault(analysis.OutcomeClass, "unknown")), truncate(firstNonEmpty(analysis.TrajectorySummary, analysis.RootCause, analysis.ImmediateCause), 220)))
+		}
+	}
+	if len(tips) > 0 {
+		sb.WriteString("\n### Durable Guidance Already Learned\n")
+		for _, tip := range firstNTips(tips, 4) {
+			sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", strings.ToUpper(tip.TipType), tip.Title, truncate(tip.Content, 180)))
+		}
+	}
+	if len(runs) > 0 {
+		sb.WriteString("\n### Recent Retrieval Behavior\n")
+		for _, run := range firstNRuns(runs, 3) {
+			desc := firstNonEmpty(run.Subtask, run.FailureSignature, run.QueryText)
+			sb.WriteString(fmt.Sprintf("- Retrieved %d tip(s) for %s\n", len(run.SelectedTipIDs), truncate(desc, 120)))
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func (s *TrajectoryMemoryService) renderContextChangeLog(tasks []*models.AgentTask, sessions []*models.AgentSession, events []*trajectoryEvent) string {
+	lines := make([]string, 0, 24)
+	for _, task := range firstNTasks(tasks, 5) {
+		reason := firstNonEmpty(task.OutputSummary, task.ErrorMessage, task.Title)
+		lines = append(lines, fmt.Sprintf("- %s task `%s` [%s]: %s", task.UpdatedAt.UTC().Format("2006-01-02 15:04"), task.ID[:8], strings.ToUpper(task.Status), truncate(reason, 220)))
+	}
+	for _, session := range firstNSessions(sessions, 5) {
+		lines = append(lines, fmt.Sprintf("- %s session `%s` on branch `%s` closed as `%s`", session.CreatedAt.UTC().Format("2006-01-02 15:04"), session.ID[:8], valueOrDefault(session.BranchName, "unknown"), valueOrDefault(session.Status, "active")))
+	}
+	for _, event := range firstNEvents(events, 8) {
+		reason := firstNonEmpty(event.Summary, event.Subtask, event.EventType)
+		lines = append(lines, fmt.Sprintf("- %s %s: %s", event.CreatedAt.UTC().Format("2006-01-02 15:04"), valueOrDefault(event.EventType, "event"), truncate(reason, 220)))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "- No prior branch changes have been materialized yet.")
+	}
+	return "## Recent Change Log\n\n" + strings.Join(lines, "\n")
+}
+
+func firstNTasks(items []*models.AgentTask, n int) []*models.AgentTask {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
+func firstNAnalyses(items []*models.TrajectoryAnalysis, n int) []*models.TrajectoryAnalysis {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
+func firstNTips(items []*models.MemoryTip, n int) []*models.MemoryTip {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
+func firstNRuns(items []*models.RetrievalRun, n int) []*models.RetrievalRun {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
+func firstNSessions(items []*models.AgentSession, n int) []*models.AgentSession {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
+func firstNEvents(items []*trajectoryEvent, n int) []*trajectoryEvent {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
 }
 
 func (s *TrajectoryMemoryService) generateTipsFromAnalysis(ctx context.Context, analysis *models.TrajectoryAnalysis) ([]*models.MemoryTip, error) {

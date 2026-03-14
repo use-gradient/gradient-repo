@@ -184,6 +184,7 @@ func (s *EnvService) CreateEnvironment(ctx context.Context, req *CreateEnvReques
 		RegistryPass:  regPass,
 		EnvID:         envID,
 		OrgID:         req.OrgID,
+		RepoFullName:  req.RepoFullName,
 		Branch:        req.ContextBranch,
 		APIURL:        s.config.APIURL,
 		NATSUrl:       s.config.NATSUrl,

@@ -541,6 +541,9 @@ echo '%s' | docker login --username '%s' --password-stdin %s
 	if config.OrgID != "" {
 		agentEnvFile += fmt.Sprintf("GRADIENT_ORG_ID=%s\n", config.OrgID)
 	}
+	if config.RepoFullName != "" {
+		agentEnvFile += fmt.Sprintf("GRADIENT_REPO_FULL_NAME=%s\n", config.RepoFullName)
+	}
 	if config.APIURL != "" {
 		agentEnvFile += fmt.Sprintf("GRADIENT_API_URL=%s\n", config.APIURL)
 	}

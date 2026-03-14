@@ -51,7 +51,7 @@ func (s *ClaudeService) SaveConfig(ctx context.Context, orgID, userID, apiKey, m
 		cfg.Model = "claude-sonnet-4-20250514"
 	}
 	if cfg.MaxTurns == 0 {
-		cfg.MaxTurns = 50
+		cfg.MaxTurns = 250
 	}
 	if len(cfg.AllowedTools) == 0 {
 		cfg.AllowedTools = []string{"Edit", "Write", "Bash", "Read"}
@@ -97,7 +97,7 @@ func (s *ClaudeService) GetConfig(ctx context.Context, orgID, userID string) (*m
 	if userID != "" {
 		query = `
 			SELECT id, org_id, user_id, anthropic_api_key, COALESCE(model, 'claude-sonnet-4-20250514'),
-				COALESCE(max_turns, 50), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
+				COALESCE(max_turns, 250), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
 				COALESCE(enable_teams, true),
 				COALESCE(max_cost_per_task, 0), COALESCE(max_tokens_per_task, 100000),
 				created_at, updated_at
@@ -108,13 +108,13 @@ func (s *ClaudeService) GetConfig(ctx context.Context, orgID, userID string) (*m
 	} else {
 		query = `
 			SELECT id, org_id, user_id, anthropic_api_key, COALESCE(model, 'claude-sonnet-4-20250514'),
-				COALESCE(max_turns, 50), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
+				COALESCE(max_turns, 250), COALESCE(allowed_tools::text, '["Edit","Write","Bash","Read"]'),
 				COALESCE(enable_teams, true),
 				COALESCE(max_cost_per_task, 0), COALESCE(max_tokens_per_task, 100000),
 				created_at, updated_at
 			FROM claude_configs
 			WHERE org_id = $1
-			ORDER BY user_id NULLS LAST LIMIT 1`
+			Order BY user_id NULLS LAST LIMIT 1`
 		args = []interface{}{orgID}
 	}
 

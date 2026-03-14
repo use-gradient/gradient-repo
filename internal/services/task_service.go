@@ -563,6 +563,10 @@ func (s *TaskService) addLog(ctx context.Context, taskID, step, status, message 
 	}
 }
 
+func (s *TaskService) AddLog(ctx context.Context, taskID, step, status, message string, metadata map[string]interface{}) {
+	s.addLog(ctx, taskID, step, status, message, metadata)
+}
+
 func (s *TaskService) GetTaskLogs(ctx context.Context, orgID, taskID string) ([]*models.TaskLogEntry, error) {
 	var count int
 	s.db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_tasks WHERE id = $1 AND org_id = $2`, taskID, orgID).Scan(&count)

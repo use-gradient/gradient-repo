@@ -87,6 +87,7 @@ type ProviderConfig struct {
 	// Agent configuration (passed to gradient-agent via cloud-init / userdata / startup script)
 	EnvID         string // Environment ID for API calls & mesh scoping
 	OrgID         string // Organization ID
+	RepoFullName  string // Connected repo for repo-scoped context materialization
 	Branch        string // Git branch (for Live Context Mesh scoping)
 	APIURL        string // Gradient API URL (e.g. https://api.usegradient.dev)
 	AuthToken     string // Auth token for API calls
